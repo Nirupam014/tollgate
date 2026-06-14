@@ -264,10 +264,47 @@ def analyze_path(paths, cfg: Optional[Config] = None,
         lr = _lint_only(fpath, cfg)
         if lr is not None:
             run.lint_results.append(lr)
+    if cfg.agentic_lint:
+        run.lint_results.extend(_lint_non_python(paths, cfg))
     if cfg.prompt_scan:
         run.detected_prompts = _scan_prompts(paths, cfg)
     run.fingerprint = _fingerprint(run, cfg)
     return run
+
+
+def _lint_non_python(paths, cfg: Config) -> List["LintResult"]:
+    """Run the language-agnostic textual linter over non-Python source (.py is
+    already covered by discovery + the AST linter). Advisory, like the Python
+    lint-only path: a LintResult only when the file is agentic and has findings."""
+    out: List[LintResult] = []
+    seen = set()
+    scorer = RiskScorer(block_at_score=cfg.block_at_score, warn_at_score=cfg.warn_at_score)
+
+    def consider(fp: str):
+        if fp in seen:
+            return
+        seen.add(fp)
+        ext = os.path.splitext(fp)[1].lower()
+        if ext == ".py" or ext not in SCANNABLE_EXTS:
+            return
+        findings = lint_source(fp, cfg.lint_strictness)
+        if not findings:
+            return
+        gate = worse_gate(scorer.score(findings).gate_decision,
+                          lint_gate(findings, cfg.lint_strictness))
+        out.append(LintResult(source_path=fp, source_kind=f"agentic-lint:{ext.lstrip('.')}",
+                              findings=findings, gate_decision=gate,
+                              score=scorer.score(findings).score))
+
+    for p in paths:
+        if os.path.isfile(p):
+            consider(p)
+        elif os.path.isdir(p):
+            for root, dirs, files in os.walk(p):
+                dirs[:] = [d for d in dirs if d.lower() not in _SKIP_DIR_SEGMENTS]
+                for f in files:
+                    consider(os.path.join(root, f))
+    return out
 
 
 def _scan_prompts(paths, cfg: Config) -> List["DetectedPrompt"]:

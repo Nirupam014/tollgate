@@ -719,6 +719,35 @@ class TestAgenticLint(unittest.TestCase):
         run = self._run(body)
         self.assertIn("missing_iteration_cap", self._lint_cats(run))
 
+    def test_language_agnostic_lint_non_python(self):
+        # The textual lint must catch infinite-loop-around-an-LLM-call and uncapped
+        # output in non-Python source, and stay quiet on safe / non-agentic code.
+        from tollgate.agentic_lint import lint_source
+        import tempfile
+        d = tempfile.mkdtemp()
+        def w(name, src):
+            p = os.path.join(d, name)
+            with open(p, "w") as fh:
+                fh.write(src)
+            return p
+        js_loop = w("agent.js",
+            'import {OpenAI} from "openai";\nasync function run(m){\n'
+            '  while (true) {\n    await client.chat.completions.create({model:"gpt-4o", messages:m});\n  }\n}')
+        go_loop = w("agent.go",
+            'package main\nimport "openai"\nfunc run(){\n  for {\n'
+            '    _ = openai.chat.completions.create(req)\n  }\n}')
+        ts_uncapped = w("u.ts",
+            'import {OpenAI} from "openai";\nconst r = await client.chat.completions.create({model:"gpt-4o", messages});')
+        ts_capped = w("c.ts",
+            'import {OpenAI} from "openai";\nfor (const x of items){ await client.chat.completions.create({model, messages:x, max_tokens:256}); }')
+        plain = w("p.go", "package main\nfunc main(){ for { work(); if c { break } } }")
+
+        self.assertIn("unbounded_loop", {f.category for f in lint_source(js_loop)})
+        self.assertIn("unbounded_loop", {f.category for f in lint_source(go_loop)})
+        self.assertIn("uncapped_output", {f.category for f in lint_source(ts_uncapped)})
+        self.assertEqual(lint_source(ts_capped), [])      # bounded + capped -> clean
+        self.assertEqual(lint_source(plain), [])          # not agentic -> silent
+
     def test_strictness_off_disables_lint(self):
         body = ("from langchain.agents import AgentExecutor\n"
                 "ex = AgentExecutor(agent=a, tools=t)\n")

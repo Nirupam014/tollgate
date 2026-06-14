@@ -7,6 +7,10 @@ All notable changes to this project are documented here. The format follows
 ## [Unreleased]
 
 ### Added
+- **Language-agnostic agentic lint.** Beyond Python's AST checks, the linter now
+  runs a deterministic textual pass on any other language (JS/TS, Go, Java, Ruby,
+  …) that flags the two universal risks — an infinite loop wrapping an LLM call,
+  and an LLM call with no output-token cap. Advisory; never claims a recovered graph.
 - **Language-agnostic prompt mining (`prompt_scan`).** Finds LLM prompts hidden in
   source as string constants / heredocs / config values across any language
   (Python, JS/TS, Go, Ruby, YAML, …) via a heuristic literal scanner with

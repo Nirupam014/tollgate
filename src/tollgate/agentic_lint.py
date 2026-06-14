@@ -42,6 +42,7 @@ from __future__ import annotations
 
 import ast
 import os
+import re
 from typing import Dict, List, Optional, Set, Tuple
 
 from .findings import Finding
@@ -106,7 +107,7 @@ _FRAMEWORKS: Dict[str, dict] = {
 # Token-cap kwargs that make an LLM generation bounded.
 _OUTPUT_CAP_KWARGS = {
     "max_tokens", "max_output_tokens", "max_completion_tokens",
-    "max_new_tokens", "maxOutputTokens", "max_tokens_to_sample",
+    "max_new_tokens", "maxOutputTokens", "maxTokens", "max_tokens_to_sample",
 }
 
 # LangChain / LlamaIndex chat-model *constructors*. Code using these frameworks
@@ -177,15 +178,19 @@ def _detect_frameworks(source: str) -> Set[str]:
 
 def lint_source(path: str, strictness: str = "strict",
                 source: Optional[str] = None) -> List[Finding]:
-    """Return agentic findings for a Python source file. Empty if not agentic.
+    """Return agentic findings for a source file in any language. Empty if not agentic.
+
+    Python is parsed with the AST for high-fidelity checks. For every other
+    language we fall back to a deterministic **textual** pass (regex) that flags
+    the two highest-value, language-universal risks — an infinite loop wrapping an
+    LLM call, and an LLM call with no output-token cap. The textual pass is
+    explicitly advisory/lower-fidelity; it never claims a recovered graph.
 
     `strictness` only affects *which severities exist*; the gate escalation lives
     in `lint_gate`. Both are pure functions of the findings, so results are
     deterministic.
     """
     if strictness == "off":
-        return []
-    if not path.endswith(".py"):
         return []
     if source is None:
         try:
@@ -199,20 +204,95 @@ def lint_source(path: str, strictness: str = "strict",
     if not frameworks and not has_sdk:
         return []  # no agentic signal -> stay silent
 
-    try:
-        tree = ast.parse(source)
-    except (SyntaxError, ValueError, RecursionError):
-        return []
-
     out: List[Finding] = []
-    out += _check_unbounded_loops(tree, path)
-    out += _check_missing_caps(tree, path, frameworks, source)
-    out += _check_uncapped_output(tree, path)
-    out += _check_model_output_cap(tree, path)
-    out += _check_fanout(tree, path, source)
+    if path.endswith(".py"):
+        try:
+            tree = ast.parse(source)
+        except (SyntaxError, ValueError, RecursionError):
+            tree = None
+        if tree is not None:
+            out += _check_unbounded_loops(tree, path)
+            out += _check_missing_caps(tree, path, frameworks, source)
+            out += _check_uncapped_output(tree, path)
+            out += _check_model_output_cap(tree, path)
+            out += _check_fanout(tree, path, source)
+        else:
+            out += _textual_checks(source, path)
+    else:
+        # Any non-Python language: deterministic regex pass.
+        out += _textual_checks(source, path)
     # Stable order + ids for deterministic output.
     for i, f in enumerate(out):
         f.finding_id = f"lint_{i + 1}"
+    return out
+
+
+# --- language-agnostic textual checks (non-Python) ---------------------------
+# An infinite-loop header in C-family / Python / Go / Rust syntax. We only flag
+# *infinite* loops (while(true)/for(;;)/loop{) — a `for x of items` is bounded.
+_INF_LOOP_RE = re.compile(
+    r'(?im)(?:\bwhile\s*\(\s*(?:true|1)\s*\)|\bwhile\s+true\b|'
+    r'\bfor\s*\(\s*;\s*;\s*\)|\bfor\s*\{|\bloop\s*\{)')   # incl. Go `for {`
+# A recognized LLM SDK call by its dotted tail, followed by an open paren.
+_SDK_CALL_TEXT_RE = re.compile(
+    r'(?:' + r'|'.join(re.escape(m) for m in SDK_CALL_MARKERS) + r')\s*\(')
+
+
+def _line_at(text: str, idx: int) -> int:
+    return text.count("\n", 0, idx) + 1
+
+
+def _textual_checks(source: str, path: str) -> List[Finding]:
+    out: List[Finding] = []
+    out += _textual_unbounded_loops(source, path)
+    out += _textual_uncapped_output(source, path)
+    return out
+
+
+def _textual_unbounded_loops(source: str, path: str) -> List[Finding]:
+    """Infinite loop whose body (heuristic window) issues an LLM call with no
+    break/return. Erring toward under-flagging: a break anywhere in the window
+    suppresses the finding."""
+    out: List[Finding] = []
+    for m in _INF_LOOP_RE.finditer(source):
+        window = source[m.end(): m.end() + 1500]
+        if not _SDK_CALL_TEXT_RE.search(window):
+            continue
+        if re.search(r'\b(break|return)\b', window):
+            continue
+        out.append(Finding(
+            finding_id="lint", category="unbounded_loop",
+            severity=_SEV["unbounded_loop"],
+            message="An infinite loop drives an LLM call with no break/return in "
+                    "sight — the agent loop looks unbounded; cost is unbounded under "
+                    "adverse inputs. (Heuristic, non-Python source.)",
+            source_path=path, line=_line_at(source, m.start()),
+            evidence={"check": "unbounded_loop", "engine": "textual"}))
+    return out
+
+
+def _textual_uncapped_output(source: str, path: str) -> List[Finding]:
+    """A recognized LLM SDK call with no output-token cap kwarg in its argument
+    window. Heuristic (the window is bounded, not brace-matched)."""
+    out: List[Finding] = []
+    seen: Set[int] = set()
+    for m in _SDK_CALL_TEXT_RE.finditer(source):
+        args = source[m.end(): m.end() + 500]
+        if any(k in args for k in _OUTPUT_CAP_KWARGS):
+            continue
+        ln = _line_at(source, m.start())
+        if ln in seen:
+            continue
+        seen.add(ln)
+        call = m.group(0).rstrip("( \t")
+        out.append(Finding(
+            finding_id="lint", category="uncapped_output",
+            severity=_SEV["uncapped_output"],
+            message=f"LLM call `{call}(...)` sets no max output-token cap "
+                    f"(max_tokens / maxTokens / ...); a single response can run to "
+                    f"the model's full limit. (Heuristic, non-Python source.)",
+            source_path=path, line=ln,
+            evidence={"check": "uncapped_output", "engine": "textual", "call": call}))
     return out
 
 
