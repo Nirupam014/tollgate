@@ -1,0 +1,92 @@
+# Ground-truth labels for the Tollgate validation corpus.
+#
+# Each case is hand-labeled with the properties Tollgate claims to detect. The
+# harness (validation/harness.py) runs the analyzer over these files, derives the
+# predicted labels, and reports a per-task confusion matrix plus precision /
+# recall / F1 — and compares against trivial baselines.
+#
+# Label fields (all optional except `path` and `discovered`):
+#   path        - file relative to the repository root
+#   discovered  - true if a directory scan should surface this file as a workflow
+#   gate        - expected gate decision: pass | warn | block
+#   loop        - expected worst recursive_loop severity: critical | medium | none
+#   recommend   - true if at least one model-substitution recommendation is expected
+#   note        - human description of why this is the ground truth
+#
+# `gate`, `loop`, `recommend` are only checked when present (a `discovered: false`
+# case has nothing downstream to assert).
+
+cases:
+  # ---- POSITIVES: must be flagged ----------------------------------------
+  - path: validation/corpus/cases/unbounded_while.py
+    discovered: true
+    gate: block
+    loop: critical
+    note: while True with no break, growing queue -> unbounded cost.
+
+  - path: validation/corpus/cases/growing_queue_for.py
+    discovered: true
+    gate: block
+    loop: critical
+    note: for-loop over a list it appends to -> effectively unbounded.
+
+  - path: validation/corpus/cases/wrapper_chain_while.py
+    discovered: true
+    gate: block
+    loop: critical
+    note: BabyAGI shape; LLM calls reached transitively through wrappers.
+
+  - path: examples/workflows/runaway_agent.yaml
+    discovered: true
+    gate: block
+    loop: critical
+    recommend: true
+    note: DSL agent, unguarded loop + context growth + frontier model on routing.
+
+  - path: validation/corpus/cases/expensive_single_call.py
+    discovered: true
+    gate: pass
+    loop: none
+    recommend: true
+    note: no loop, but a frontier model on a trivial task -> cheaper-model rec.
+
+  # ---- HARD NEGATIVES: must NOT be over-flagged --------------------------
+  - path: validation/corpus/cases/bounded_while_break.py
+    discovered: true
+    loop: medium
+    note: while True WITH a break; bounded, so not critical.
+
+  - path: validation/corpus/cases/bounded_for_range.py
+    discovered: true
+    gate: pass
+    loop: none
+    note: for _ in range(N), no queue growth -> genuinely bounded ReAct loop.
+
+  - path: validation/corpus/cases/sequential_two_calls.py
+    discovered: true
+    gate: pass
+    loop: none
+    note: straight-line two-call script, no loop at all.
+
+  - path: validation/corpus/cases/uncapped_output_call.py
+    discovered: true
+    gate: warn
+    loop: none
+    note: >
+      single bounded call with no max_tokens -> strict uncapped_output -> WARN
+      (soft per-call risk, not a block). Pins the strict flag-absence behavior.
+
+  - path: examples/workflows/safe_pipeline.yaml
+    discovered: true
+    gate: pass
+    loop: medium
+    note: bounded retry loop (guard max_depth=2) -> medium verify-the-bound, still PASS.
+
+  # ---- NON-WORKFLOWS: must not be discovered -----------------------------
+  - path: validation/corpus/cases/not_an_agent.py
+    discovered: false
+    note: plain Python (server loop), no LLM SDK call.
+
+  - path: validation/corpus/cases/docs_readme.md
+    discovered: false
+    note: documentation that mentions SDK calls in prose / code fences.

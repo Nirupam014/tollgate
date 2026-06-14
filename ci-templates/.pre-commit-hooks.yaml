@@ -1,0 +1,17 @@
+# Optional: run Tollgate locally before each commit.
+# In your repo's .pre-commit-config.yaml add:
+#
+#   repos:
+#     - repo: https://github.com/nirupam014/tollgate
+#       rev: v0.1.0
+#       hooks:
+#         - id: tollgate
+#
+- id: tollgate
+  name: Tollgate
+  description: Predict token cost and block risky agent workflows before commit.
+  entry: tollgate analyze
+  language: python
+  pass_filenames: true
+  args: ["--fail-on", "block", "-f", "terminal"]
+  types_or: [yaml, python, text]

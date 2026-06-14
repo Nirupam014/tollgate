@@ -1,0 +1,41 @@
+# Copy to .github/workflows/tollgate.yml in your repo.
+#
+# Gates pull requests on AI token-consumption risk: predicts tokens, blocks
+# unbounded loops / context explosion / token blowouts, posts a PR comment, and
+# uploads findings to the Security tab.
+name: Tollgate
+
+on:
+  pull_request:
+    # Optional: only run when agent/prompt artifacts change.
+    paths:
+      - "**/*.yaml"
+      - "**/*.yml"
+      - "**/*.prompt"
+      - "**/*.py"
+      - ".tollgate.yml"
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+  pull-requests: write      # to post the PR comment
+  security-events: write    # to upload SARIF
+
+jobs:
+  token-cfo:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # If you published the action: uses: nirupam014/tollgate@v1
+      - name: Tollgate
+        uses: nirupam014/tollgate@v1
+        with:
+          paths: "agents prompts"     # adjust to where your workflows live
+          fail-on: block
+          comment: "true"
+          upload-sarif: "true"
+
+# Make this check required:
+#   Settings -> Branches -> Branch protection rule -> Require status checks ->
+#   select "token-cfo". The PR cannot merge while the gate returns 'block'.

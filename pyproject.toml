@@ -1,0 +1,53 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "tollgate"
+version = "0.1.0"
+description = "Tollgate — prevention-first token-risk analysis for AI agents, for CI/CD. Predicts token cost, detects context explosion & recursive agent loops, and gates PRs/MRs before deploy."
+readme = "README.md"
+requires-python = ">=3.9"
+license = "Apache-2.0"
+license-files = ["LICENSE"]
+authors = [{ name = "Nirupam Chakrabarti" }]
+keywords = [
+  "llm", "ai-agents", "agentic", "static-analysis", "linter", "tokens",
+  "guardrails", "ci-cd", "prompt", "langgraph", "crewai", "github", "gitlab",
+]
+classifiers = [
+  "Development Status :: 4 - Beta",
+  "Intended Audience :: Developers",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.9",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Topic :: Software Development :: Quality Assurance",
+  "Topic :: Software Development :: Libraries :: Python Modules",
+  "Environment :: Console",
+]
+dependencies = [
+  "PyYAML>=5.4",
+]
+
+[project.urls]
+Homepage = "https://github.com/nirupam014/tollgate"
+Repository = "https://github.com/nirupam014/tollgate"
+Issues = "https://github.com/nirupam014/tollgate/issues"
+Changelog = "https://github.com/nirupam014/tollgate/blob/main/CHANGELOG.md"
+
+[project.optional-dependencies]
+# Optional: exact tokenization for OpenAI-family models. The analyzer works
+# without it using a deterministic heuristic tokenizer.
+tokenizers = ["tiktoken>=0.5"]
+dev = ["pytest>=7", "build>=1", "tiktoken>=0.5"]
+
+[project.scripts]
+tollgate = "tollgate.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+tollgate = ["data/*.yaml", "data/*.yml"]

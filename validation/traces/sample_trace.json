@@ -1,0 +1,93 @@
+{
+  "trace_id": "support_triage_v3",
+  "note": "Synthetic-but-realistic production trace for the calibration harness. 'observations' are per-node measured token counts collected from a real run (e.g. an LLM proxy log or OpenTelemetry GenAI spans: gen_ai.usage.input_tokens / output_tokens). The harness builds the workflow IR, runs the heuristic predictor WITHOUT this telemetry, then scores predicted token distributions against the measured percentiles. Replace this file with an export of your own traffic to calibrate on your workload.",
+  "workflow": {
+    "workflow_id": "support_triage",
+    "source_kind": "dsl",
+    "entry": "classify",
+    "nodes": [
+      {
+        "id": "classify",
+        "kind": "llm_call",
+        "model": "gpt-4o-mini",
+        "task_class": "classification",
+        "prompt": "You are a support-ticket router. Read the customer message and output exactly one label from: billing, bug, feature_request, account, other. Respond with only the label.",
+        "max_output_tokens": 8
+      },
+      {
+        "id": "retrieve_answer",
+        "kind": "llm_call",
+        "model": "gpt-4o",
+        "task_class": "generation",
+        "retrieves_context": true,
+        "retrieved_context_cap": 3000,
+        "prompt": "You are a senior support engineer. Using the retrieved knowledge-base passages, write a concise, accurate answer to the customer's question. Cite article ids inline."
+      },
+      {
+        "id": "summarize_thread",
+        "kind": "llm_call",
+        "model": "gpt-4o-mini",
+        "task_class": "extraction",
+        "appends_history": true,
+        "prompt": "Summarize the conversation so far into a 2-3 sentence internal note for the next agent."
+      }
+    ],
+    "edges": [
+      { "from": "classify", "to": "retrieve_answer", "type": "sequence" },
+      { "from": "retrieve_answer", "to": "summarize_thread", "type": "sequence" }
+    ]
+  },
+  "observations": {
+    "classify": [
+      { "input_tokens": 188, "output_tokens": 3 },
+      { "input_tokens": 142, "output_tokens": 2 },
+      { "input_tokens": 263, "output_tokens": 4 },
+      { "input_tokens": 205, "output_tokens": 3 },
+      { "input_tokens": 171, "output_tokens": 2 },
+      { "input_tokens": 320, "output_tokens": 5 },
+      { "input_tokens": 233, "output_tokens": 3 },
+      { "input_tokens": 199, "output_tokens": 3 },
+      { "input_tokens": 412, "output_tokens": 6 },
+      { "input_tokens": 158, "output_tokens": 2 },
+      { "input_tokens": 287, "output_tokens": 4 },
+      { "input_tokens": 224, "output_tokens": 3 },
+      { "input_tokens": 176, "output_tokens": 2 },
+      { "input_tokens": 351, "output_tokens": 5 },
+      { "input_tokens": 209, "output_tokens": 3 }
+    ],
+    "retrieve_answer": [
+      { "input_tokens": 2840, "output_tokens": 512 },
+      { "input_tokens": 3120, "output_tokens": 740 },
+      { "input_tokens": 2610, "output_tokens": 430 },
+      { "input_tokens": 3380, "output_tokens": 905 },
+      { "input_tokens": 2955, "output_tokens": 620 },
+      { "input_tokens": 4120, "output_tokens": 1180 },
+      { "input_tokens": 2730, "output_tokens": 388 },
+      { "input_tokens": 3050, "output_tokens": 712 },
+      { "input_tokens": 3640, "output_tokens": 980 },
+      { "input_tokens": 2880, "output_tokens": 545 },
+      { "input_tokens": 3210, "output_tokens": 803 },
+      { "input_tokens": 2690, "output_tokens": 470 },
+      { "input_tokens": 5020, "output_tokens": 1520 },
+      { "input_tokens": 3015, "output_tokens": 660 },
+      { "input_tokens": 2770, "output_tokens": 505 }
+    ],
+    "summarize_thread": [
+      { "input_tokens": 940, "output_tokens": 78 },
+      { "input_tokens": 1320, "output_tokens": 95 },
+      { "input_tokens": 760, "output_tokens": 64 },
+      { "input_tokens": 1880, "output_tokens": 120 },
+      { "input_tokens": 1110, "output_tokens": 88 },
+      { "input_tokens": 2540, "output_tokens": 142 },
+      { "input_tokens": 690, "output_tokens": 57 },
+      { "input_tokens": 1460, "output_tokens": 103 },
+      { "input_tokens": 2010, "output_tokens": 131 },
+      { "input_tokens": 880, "output_tokens": 72 },
+      { "input_tokens": 1240, "output_tokens": 90 },
+      { "input_tokens": 3120, "output_tokens": 168 },
+      { "input_tokens": 1020, "output_tokens": 81 },
+      { "input_tokens": 1670, "output_tokens": 112 },
+      { "input_tokens": 950, "output_tokens": 76 }
+    ]
+  }
+}

@@ -1,0 +1,92 @@
+# Tollgate — GitHub composite Action.
+#
+# Drop this repo as a published action (e.g. nirupam014/tollgate@v1) and
+# reference it from a workflow, or vendor it and use `uses: ./` locally.
+name: "Tollgate"
+description: "Predict token consumption and block PRs with context explosion, recursive loops, or token blowouts before deploy."
+branding:
+  icon: "activity"
+  color: "green"
+
+inputs:
+  paths:
+    description: "Space-separated files/dirs to analyze."
+    required: false
+    default: "."
+  config:
+    description: "Path to .tollgate.yml (auto-discovered if omitted)."
+    required: false
+    default: ""
+  models:
+    description: "Path to a model catalog YAML overriding the seed catalog."
+    required: false
+    default: ""
+  fail-on:
+    description: "block | warn | never — gate severity that fails the check."
+    required: false
+    default: "block"
+  comment:
+    description: "Post/update a PR comment with the report (true/false)."
+    required: false
+    default: "true"
+  upload-sarif:
+    description: "Upload SARIF to GitHub code scanning (true/false)."
+    required: false
+    default: "true"
+
+outputs:
+  gate:
+    description: "Overall gate decision: pass | warn | block."
+    value: ${{ steps.analyze.outputs.gate }}
+  score:
+    description: "Max deployment risk score (0-100)."
+    value: ${{ steps.analyze.outputs.score }}
+
+runs:
+  using: "composite"
+  steps:
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: "3.11"
+
+    - name: Install Tollgate
+      shell: bash
+      run: pip install "${{ github.action_path }}"
+
+    - name: Run analysis
+      id: analyze
+      shell: bash
+      run: |
+        set +e
+        ARGS="${{ inputs.paths }}"
+        [ -n "${{ inputs.config }}" ] && ARGS="$ARGS --config ${{ inputs.config }}"
+        [ -n "${{ inputs.models }}" ] && ARGS="$ARGS --models ${{ inputs.models }}"
+        tollgate analyze $ARGS \
+          --fail-on "${{ inputs.fail-on }}" \
+          -f terminal \
+          -o markdown=tollgate-report.md \
+          -o sarif=tollgate.sarif \
+          -o json=tollgate.json
+        CODE=$?
+        # Extract gate/score for outputs (json already on disk).
+        GATE=$(python -c "import json;print(json.load(open('tollgate.json'))['gate_decision'])")
+        SCORE=$(python -c "import json;print(json.load(open('tollgate.json'))['max_score'])")
+        echo "gate=$GATE" >> "$GITHUB_OUTPUT"
+        echo "score=$SCORE" >> "$GITHUB_OUTPUT"
+        exit $CODE
+
+    - name: Upload SARIF
+      if: always() && inputs.upload-sarif == 'true'
+      uses: github/codeql-action/upload-sarif@v3
+      with:
+        sarif_file: tollgate.sarif
+      continue-on-error: true
+
+    - name: Comment on PR
+      if: always() && inputs.comment == 'true' && github.event_name == 'pull_request'
+      uses: marocchino/sticky-pull-request-comment@v2
+      with:
+        header: tollgate
+        path: tollgate-report.md
+      continue-on-error: true

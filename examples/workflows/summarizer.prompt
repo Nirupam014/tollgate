@@ -1,0 +1,9 @@
+---
+model: gpt-4o
+task_class: generation
+retrieves_context: true
+---
+You are a meticulous summarizer. Summarize the following documents into a concise
+brief for an executive audience. Preserve key figures and decisions.
+
+{{documents}}

@@ -1,0 +1,43 @@
+# Tollgate — GitLab CI/CD template.
+#
+# Add to your .gitlab-ci.yml (or `include:` it). Gates merge requests on AI
+# token-cost risk and publishes findings as a Code Quality report, which GitLab
+# renders inline in the MR diff and in the MR widget.
+#
+# To BLOCK a merge: make this job required via
+#   Settings -> Merge requests -> Pipelines must succeed, and/or a
+#   "Code Quality degradation" merge check. A 'block' gate exits non-zero and
+#   fails the pipeline.
+
+stages:
+  - tollgate
+
+tollgate:
+  stage: tollgate
+  image: python:3.11-slim
+  variables:
+    # Paths to scan; adjust to where your agent/prompt definitions live.
+    AITC_PATHS: "."
+    AITC_FAIL_ON: "block"
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+    - if: '$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
+  before_script:
+    # Install from PyPI (recommended): pip install tollgate
+    # Or vendor the package and: pip install ./tollgate
+    - pip install tollgate
+  script:
+    - >
+      tollgate analyze $AITC_PATHS
+      --fail-on "$AITC_FAIL_ON"
+      -f terminal
+      -o gitlab=gl-code-quality.json
+      -o markdown=tollgate-report.md
+      -o json=tollgate.json
+  artifacts:
+    when: always
+    paths:
+      - tollgate-report.md
+      - tollgate.json
+    reports:
+      codequality: gl-code-quality.json

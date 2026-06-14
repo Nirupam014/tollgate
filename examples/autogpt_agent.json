@@ -1,0 +1,37 @@
+{
+  "id": "autogpt-demo-0001",
+  "name": "research_refine_loop",
+  "version": 4,
+  "description": "AutoGPT-format export: a planner/refine loop with a tool step.",
+  "nodes": [
+    {
+      "id": "11111111-1111-1111-1111-111111111111",
+      "block_id": "AITextGeneratorBlock-1",
+      "input_default": {
+        "model": "gpt-4o",
+        "prompt": "You are a research planner. Draft a plan for the user's topic.",
+        "max_tokens": 1500,
+        "temperature": 0.4
+      }
+    },
+    {
+      "id": "22222222-2222-2222-2222-222222222222",
+      "block_id": "SearchTheWebBlock-1",
+      "input_default": { "query": "", "num_results": 5 }
+    },
+    {
+      "id": "33333333-3333-3333-3333-333333333333",
+      "block_id": "AIStructuredResponseGeneratorBlock-1",
+      "input_default": {
+        "model": "claude-3-5-sonnet-latest",
+        "prompt": "Critique the draft and decide whether to iterate again.",
+        "temperature": 0.2
+      }
+    }
+  ],
+  "links": [
+    { "source_id": "11111111-1111-1111-1111-111111111111", "sink_id": "22222222-2222-2222-2222-222222222222", "source_name": "result", "sink_name": "query" },
+    { "source_id": "22222222-2222-2222-2222-222222222222", "sink_id": "33333333-3333-3333-3333-333333333333", "source_name": "results", "sink_name": "context" },
+    { "source_id": "33333333-3333-3333-3333-333333333333", "sink_id": "11111111-1111-1111-1111-111111111111", "source_name": "revise", "sink_name": "feedback" }
+  ]
+}

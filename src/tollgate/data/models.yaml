@@ -1,0 +1,291 @@
+# Tollgate — seed model catalog.
+#
+# IMPORTANT: prices below are ILLUSTRATIVE DEFAULTS for the analyzer to run
+# out of the box. They are NOT a live price feed and will drift. Override them
+# for accurate forecasts by pointing the analyzer at your own catalog:
+#     tollgate analyze <path> --models my-models.yaml
+# or set `models_file:` in .tollgate.yml. Prices are USD per 1,000,000 tokens.
+#
+# quality_tier: 1 (smallest/cheapest) .. 5 (frontier). Used for model-fit and
+# substitution-safety checks.
+
+models:
+  # ---- OpenAI ----
+  - id: gpt-4o
+    provider: openai
+    family: gpt-4o
+    context_limit: 128000
+    max_output: 16384
+    quality_tier: 4
+    supports_tools: true
+    tokenizer: o200k_base
+    input_per_mtok: 2.50
+    cached_input_per_mtok: 1.25
+    output_per_mtok: 10.00
+  - id: gpt-4o-mini
+    provider: openai
+    family: gpt-4o
+    context_limit: 128000
+    max_output: 16384
+    quality_tier: 2
+    supports_tools: true
+    tokenizer: o200k_base
+    input_per_mtok: 0.15
+    cached_input_per_mtok: 0.075
+    output_per_mtok: 0.60
+  - id: gpt-4.1
+    provider: openai
+    family: gpt-4.1
+    context_limit: 1000000
+    max_output: 32768
+    quality_tier: 4
+    supports_tools: true
+    tokenizer: o200k_base
+    input_per_mtok: 2.00
+    cached_input_per_mtok: 0.50
+    output_per_mtok: 8.00
+  - id: gpt-4.1-mini
+    provider: openai
+    family: gpt-4.1
+    context_limit: 1000000
+    max_output: 32768
+    quality_tier: 2
+    supports_tools: true
+    tokenizer: o200k_base
+    input_per_mtok: 0.40
+    cached_input_per_mtok: 0.10
+    output_per_mtok: 1.60
+
+  - id: gpt-5
+    provider: openai
+    family: gpt-5
+    context_limit: 400000
+    max_output: 128000
+    quality_tier: 5
+    supports_tools: true
+    tokenizer: o200k_base
+    input_per_mtok: 1.25
+    cached_input_per_mtok: 0.125
+    output_per_mtok: 10.00
+  - id: gpt-5-mini
+    provider: openai
+    family: gpt-5
+    context_limit: 400000
+    max_output: 128000
+    quality_tier: 3
+    supports_tools: true
+    tokenizer: o200k_base
+    input_per_mtok: 0.25
+    cached_input_per_mtok: 0.025
+    output_per_mtok: 2.00
+  - id: gpt-5-nano
+    provider: openai
+    family: gpt-5
+    context_limit: 400000
+    max_output: 128000
+    quality_tier: 2
+    supports_tools: true
+    tokenizer: o200k_base
+    input_per_mtok: 0.05
+    cached_input_per_mtok: 0.005
+    output_per_mtok: 0.40
+
+  # ---- Anthropic ----
+  - id: claude-opus-4
+    provider: anthropic
+    family: claude-4
+    context_limit: 200000
+    max_output: 32000
+    quality_tier: 5
+    supports_tools: true
+    tokenizer: claude
+    input_per_mtok: 15.00
+    cached_input_per_mtok: 1.50
+    output_per_mtok: 75.00
+  - id: claude-sonnet-4
+    provider: anthropic
+    family: claude-4
+    context_limit: 200000
+    max_output: 64000
+    quality_tier: 4
+    supports_tools: true
+    tokenizer: claude
+    input_per_mtok: 3.00
+    cached_input_per_mtok: 0.30
+    output_per_mtok: 15.00
+  - id: claude-haiku-3.5
+    provider: anthropic
+    family: claude-3.5
+    context_limit: 200000
+    max_output: 8192
+    quality_tier: 2
+    supports_tools: true
+    tokenizer: claude
+    input_per_mtok: 0.80
+    cached_input_per_mtok: 0.08
+    output_per_mtok: 4.00
+
+  # ---- Google Gemini ----
+  - id: gemini-1.5-pro
+    provider: google
+    family: gemini-1.5
+    context_limit: 2000000
+    max_output: 8192
+    quality_tier: 4
+    supports_tools: true
+    tokenizer: gemini
+    input_per_mtok: 1.25
+    cached_input_per_mtok: 0.3125
+    output_per_mtok: 5.00
+  - id: gemini-1.5-flash
+    provider: google
+    family: gemini-1.5
+    context_limit: 1000000
+    max_output: 8192
+    quality_tier: 2
+    supports_tools: true
+    tokenizer: gemini
+    input_per_mtok: 0.075
+    cached_input_per_mtok: 0.01875
+    output_per_mtok: 0.30
+  - id: gemini-2.0-flash
+    provider: google
+    family: gemini-2.0
+    context_limit: 1000000
+    max_output: 8192
+    quality_tier: 3
+    supports_tools: true
+    tokenizer: gemini
+    input_per_mtok: 0.10
+    cached_input_per_mtok: 0.025
+    output_per_mtok: 0.40
+
+  # ---- Perplexity Sonar (search-grounded; token rates only, excludes per-
+  #      request search fees which Tollgate does not project) ----
+  - id: sonar
+    provider: perplexity
+    family: sonar
+    context_limit: 128000
+    max_output: 8192
+    quality_tier: 2
+    supports_tools: false
+    tokenizer: heuristic
+    input_per_mtok: 1.00
+    output_per_mtok: 1.00
+  - id: sonar-pro
+    provider: perplexity
+    family: sonar
+    context_limit: 200000
+    max_output: 8192
+    quality_tier: 3
+    supports_tools: false
+    tokenizer: heuristic
+    input_per_mtok: 3.00
+    output_per_mtok: 15.00
+  - id: sonar-deep-research
+    provider: perplexity
+    family: sonar
+    context_limit: 128000
+    max_output: 8192
+    quality_tier: 4
+    supports_tools: false
+    tokenizer: heuristic
+    input_per_mtok: 2.00
+    output_per_mtok: 8.00
+
+  # ---- Open source (self-hosted; prices are amortized $/Mtok estimates) ----
+  - id: llama-3.3-70b
+    provider: oss
+    family: llama-3
+    context_limit: 128000
+    max_output: 8192
+    quality_tier: 3
+    supports_tools: true
+    tokenizer: sentencepiece
+    input_per_mtok: 0.60
+    output_per_mtok: 0.60
+    self_hosted: true
+  - id: llama-3.1-8b
+    provider: oss
+    family: llama-3
+    context_limit: 128000
+    max_output: 8192
+    quality_tier: 1
+    supports_tools: true
+    tokenizer: sentencepiece
+    input_per_mtok: 0.10
+    output_per_mtok: 0.10
+    self_hosted: true
+  - id: mixtral-8x7b
+    provider: oss
+    family: mixtral
+    context_limit: 32000
+    max_output: 8192
+    quality_tier: 2
+    supports_tools: true
+    tokenizer: sentencepiece
+    input_per_mtok: 0.24
+    output_per_mtok: 0.24
+    self_hosted: true
+
+# Substitution graph: from_model -> to_model with a capability_score (0..1,
+# how safe the swap is for comparable tasks). Cost ratio is computed live from
+# pricing so it stays correct when you override prices.
+substitutions:
+  - from: gpt-4o
+    to: gpt-4o-mini
+    capability_score: 0.82
+  - from: gpt-4o
+    to: gemini-2.0-flash
+    capability_score: 0.78
+  - from: gpt-4o
+    to: claude-haiku-3.5
+    capability_score: 0.75
+  - from: gpt-4.1
+    to: gpt-4.1-mini
+    capability_score: 0.83
+  - from: gpt-5
+    to: gpt-5-mini
+    capability_score: 0.86
+  - from: gpt-5
+    to: gpt-4o
+    capability_score: 0.80
+  - from: gpt-5-mini
+    to: gpt-5-nano
+    capability_score: 0.80
+  - from: gpt-5-mini
+    to: gpt-4o-mini
+    capability_score: 0.78
+  - from: sonar-pro
+    to: sonar
+    capability_score: 0.80
+  - from: sonar-deep-research
+    to: sonar-pro
+    capability_score: 0.78
+  - from: claude-opus-4
+    to: claude-sonnet-4
+    capability_score: 0.90
+  - from: claude-opus-4
+    to: claude-haiku-3.5
+    capability_score: 0.70
+  - from: claude-sonnet-4
+    to: claude-haiku-3.5
+    capability_score: 0.80
+  - from: claude-sonnet-4
+    to: gpt-4o-mini
+    capability_score: 0.76
+  - from: gemini-1.5-pro
+    to: gemini-1.5-flash
+    capability_score: 0.82
+  - from: gemini-1.5-pro
+    to: gemini-2.0-flash
+    capability_score: 0.85
+  - from: gpt-4o-mini
+    to: llama-3.1-8b
+    capability_score: 0.68
+  - from: claude-haiku-3.5
+    to: llama-3.3-70b
+    capability_score: 0.72
+  - from: gpt-4o
+    to: llama-3.3-70b
+    capability_score: 0.70

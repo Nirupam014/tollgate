@@ -1,0 +1,91 @@
+name: validation
+
+# Correctness gates for Tollgate. Every job is hermetic: stdlib-only Python,
+# no network, no extra dependencies. A red check here means a claim in
+# validation/README.md is no longer backed by evidence.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: validation-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  PYTHONPATH: src
+
+jobs:
+  # Fast gates: unit, determinism, metamorphic, corpus, fuzz, calibration.
+  # These finish in seconds and catch the overwhelming majority of regressions.
+  core:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+
+      - name: Unit tests (analyzer + logic boundaries)
+        run: python -m unittest -q tests.test_analyzer tests.test_logic_boundaries
+
+      - name: Determinism (reports are byte-identical across runs)
+        run: python -m validation.test_determinism
+
+      - name: Metamorphic relations
+        run: python -m validation.metamorphic
+
+      - name: Benchmark harness — labeled corpus (strict)
+        run: python validation/harness.py --strict --json harness.json
+
+      - name: Fuzz (never-crash + never-silently-pass)
+        run: python validation/fuzz.py --iterations 2000
+
+      - name: Cost calibration — cold (strict)
+        run: python validation/calibration.py --strict --json calib_cold.json
+
+      - name: Cost calibration — warm / telemetry (strict)
+        run: python validation/calibration.py --warm --strict --json calib_warm.json
+
+      - name: Upload diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: validation-reports
+          path: |
+            harness.json
+            calib_cold.json
+            calib_warm.json
+          if-no-files-found: ignore
+
+  # Mutation gate: runs EVERY gated logic mutant and requires that every
+  # survivor is a documented equivalent (the allow-list in validation/mutation.py).
+  # Slower than the core gates, so it runs as its own job.
+  mutation:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+
+      - name: Run all gated logic mutants
+        run: |
+          python validation/mutation.py --all-logic --per-module 0 \
+            --results mutation.jsonl
+
+      - name: Mutation gate — no unexpected survivor (strict)
+        run: python validation/mutation.py --report mutation.jsonl --strict
+
+      - name: Upload mutation results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: mutation-results
+          path: mutation.jsonl
+          if-no-files-found: ignore

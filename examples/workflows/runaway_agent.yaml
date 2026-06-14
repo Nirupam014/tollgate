@@ -1,0 +1,41 @@
+# A deliberately risky agent: an unbounded plan/act/reflect loop whose reflect
+# node appends conversation history every turn (context explosion) and runs an
+# expensive frontier model on simple routing. Tollgate should BLOCK this.
+workflow: runaway_agent
+source_kind: dsl
+entry: plan
+nodes:
+  - id: plan
+    kind: llm_call
+    model: claude-opus-4
+    task_class: reasoning
+    appends_history: true
+    prompt: |
+      You are an autonomous planning agent. Given the user goal and the full
+      conversation so far, produce the next step to take. Think carefully and
+      consider all prior context. {{history}}
+
+  - id: route
+    kind: router
+    model: claude-opus-4          # tier-5 model on a routing task -> mismatch
+    task_class: routing
+
+  - id: act
+    kind: tool
+
+  - id: reflect
+    kind: llm_call
+    model: claude-opus-4
+    task_class: reasoning
+    appends_history: true         # history grows every iteration, no truncation
+    retrieves_context: true       # uncapped retrieval
+    prompt: |
+      Reflect on the result of the last action and decide whether to continue.
+      Consider the entire history and the retrieved documents. {{history}} {{context}}
+
+edges:
+  - { from: plan, to: route, type: sequence }
+  - { from: route, to: act, type: conditional, condition: needs_tool, probability: 0.7 }
+  - { from: route, to: reflect, type: conditional, condition: done, probability: 0.3 }
+  - { from: act, to: reflect, type: sequence }
+  - { from: reflect, to: plan, type: loop }   # NO guard -> recursive loop, unbounded

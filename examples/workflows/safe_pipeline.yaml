@@ -1,0 +1,36 @@
+# A well-behaved pipeline: a bounded loop with a termination guard, cheap models
+# matched to tasks, capped retrieval, and bounded retries. Should PASS.
+workflow: safe_support_pipeline
+source_kind: dsl
+entry: classify
+nodes:
+  - id: classify
+    kind: llm_call
+    model: gpt-4o-mini
+    task_class: classification
+    prompt: "Classify the support ticket into one of: billing, technical, account."
+
+  - id: retrieve
+    kind: tool
+
+  - id: answer
+    kind: llm_call
+    model: claude-haiku-3.5
+    task_class: generation
+    retrieves_context: true
+    retrieved_context_cap: 3000
+    max_output_tokens: 600
+    retry: { max_attempts: 3, backoff: exponential }
+    prompt: "Answer the customer using the retrieved context. {{context}}"
+
+  - id: verify
+    kind: llm_call
+    model: gpt-4o-mini
+    task_class: classification
+    prompt: "Does the answer resolve the ticket? Reply yes or no."
+
+edges:
+  - { from: classify, to: retrieve, type: sequence }
+  - { from: retrieve, to: answer, type: sequence }
+  - { from: answer, to: verify, type: sequence }
+  - { from: verify, to: answer, type: loop, guard: { max_depth: 2 } }   # bounded retry

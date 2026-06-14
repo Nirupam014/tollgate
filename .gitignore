@@ -1,0 +1,25 @@
+# Byte-compiled / cache
+__pycache__/
+*.py[cod]
+
+# Packaging / build
+build/
+dist/
+*.egg-info/
+.eggs/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Tollgate's own report output (when run locally)
+tollgate.sarif
+tollgate.json
+tollgate-report.md
+gl-code-quality.json
+
+# OS / editor cruft
+.DS_Store
+.idea/
+.vscode/
