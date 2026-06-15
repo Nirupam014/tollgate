@@ -29,16 +29,9 @@ For larger changes, also run the full validation suite:
 bash validation/run_all.sh                  # metamorphic, fuzz, mutation, determinism
 ```
 
-The 30 tests in `tests/test_study_feedback.py` exercise the internal field-study
-harness (`study/`), which ships in the maintainer's private repo, not the public
-package. They auto-run when that harness is found — either checked out alongside
-this repo as `../tollgate-private/study`, or pointed at explicitly:
-
-```bash
-TOLLGATE_STUDY_DIR=/path/to/study python -m unittest discover -s tests
-```
-
-In a pure public checkout (no harness present) they skip cleanly rather than fail.
+Every test here runs against the shipped package with no external setup — there
+are no skipped tests. (The internal field-study harness and its tests live in the
+maintainer's private repo, not in this package.)
 
 ## Ground rules
 
