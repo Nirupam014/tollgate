@@ -1480,6 +1480,56 @@ class TestTreeSitterGraph(unittest.TestCase):
         self.assertIn("uncapped_output",
                       {f.category for f in run.results[0].findings})
 
+    # --- deep recovery (parity with the Python imperative parser) -------------
+    def _seq_and_loop(self, wf):
+        seq = [e for e in wf.edges if e.edge_type == "sequence"]
+        loop = [e for e in wf.edges if e.edge_type == "loop"]
+        return seq, loop
+
+    def test_multi_node_sequence_go(self):
+        """Two LLM calls per turn -> a 2-node chain (plan -> act) plus a cycle."""
+        wf = self._wf("multi_step.go")
+        self.assertEqual(len(wf.llm_nodes()), 2)
+        seq, loop = self._seq_and_loop(wf)
+        self.assertEqual(len(seq), 1)                 # plan -> act
+        self.assertEqual(len(loop), 1)               # act -> plan (back-edge)
+
+    def test_multi_node_sequence_java(self):
+        wf = self._wf("MultiStep.java")
+        self.assertEqual(len(wf.llm_nodes()), 2)
+        seq, loop = self._seq_and_loop(wf)
+        self.assertEqual(len(seq), 1)
+        self.assertEqual(len(loop), 1)
+
+    def test_multi_node_sequence_ruby(self):
+        wf = self._wf("multi_step.rb")
+        self.assertEqual(len(wf.llm_nodes()), 2)
+        seq, loop = self._seq_and_loop(wf)
+        self.assertEqual(len(seq), 1)
+        self.assertEqual(len(loop), 1)
+
+    def test_wrapper_call_chain_go(self):
+        """The loop calls a wrapper that issues the SDK call: the node is sited at
+        the wrapper, and the SDK call inside it is not double-counted."""
+        wf = self._wf("wrapper_loop.go")
+        self.assertEqual([n.node_id for n in wf.llm_nodes()], ["callLLM"])
+        _, loop = self._seq_and_loop(wf)
+        self.assertEqual(len(loop), 1)
+
+    def test_bounded_loop_has_guard_go(self):
+        """A bounded condition loop recovers a guarded (non-critical) cycle."""
+        wf = self._wf("bounded_loop.go")
+        self.assertEqual(len(wf.llm_nodes()), 1)
+        _, loop = self._seq_and_loop(wf)
+        self.assertEqual(len(loop), 1)
+        self.assertIsNotNone(loop[0].guard)          # bounded -> guard present
+        self.assertTrue(loop[0].guard.is_bounded)
+        res = analyze_workflow(wf, cfg=Config(trials=150))
+        # guarded loop is not a critical unbounded cycle
+        crit = [f for f in res.findings
+                if f.category == "recursive_loop" and f.severity == "critical"]
+        self.assertEqual(crit, [])
+
 
 if __name__ == "__main__":
     unittest.main()
