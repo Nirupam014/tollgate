@@ -1020,5 +1020,195 @@ class TestReportFormats(unittest.TestCase):
             self.assertIn(row["gate"], ("pass", "warn", "block"))
 
 
+class TestBaselineDiff(unittest.TestCase):
+    """PR-delta gating: diff a fresh report against a baseline and gate only on
+    new/worsened findings."""
+
+    def _report(self, findings, *, gate="warn", lint=None, fp="fp0"):
+        """Build a minimal report dict in the RunResult.to_dict() shape."""
+        return {
+            "gate_decision": gate,
+            "fingerprint": fp,
+            "results": [{"source_path": "/repo/agent.py",
+                         "findings": list(findings),
+                         "policy_violations": []}],
+            "lint_results": list(lint or []),
+        }
+
+    def _f(self, category, severity, message, node_id=None, source_path="/repo/agent.py",
+           line=None):
+        return {"finding_id": f"{category}-x", "category": category, "severity": severity,
+                "message": message, "node_id": node_id, "source_path": source_path,
+                "line": line, "evidence": {}}
+
+    def test_brand_new_finding_is_flagged_and_blocks(self):
+        from tollgate.baseline import diff_reports
+        base = self._report([self._f("uncapped_output", "medium", "no cap on call A")])
+        cur = self._report([
+            self._f("uncapped_output", "medium", "no cap on call A"),
+            self._f("recursive_loop", "critical", "Cycle x has no guard", node_id="x"),
+        ])
+        diff = diff_reports(cur, base)
+        self.assertEqual(diff["delta_gate"], "block")           # new critical
+        self.assertEqual(diff["counts"]["new"], 1)
+        self.assertEqual(diff["counts"]["unchanged"], 1)
+        self.assertEqual(diff["new"][0]["category"], "recursive_loop")
+
+    def test_preexisting_only_passes(self):
+        """The whole point: a risky repo with no NEW issues must not fail the PR."""
+        from tollgate.baseline import diff_reports
+        findings = [self._f("recursive_loop", "critical", "Cycle x has no guard", node_id="x")]
+        base = self._report(findings, gate="block")
+        cur = self._report(findings, gate="block")
+        diff = diff_reports(cur, base)
+        self.assertEqual(diff["delta_gate"], "pass")
+        self.assertEqual(diff["counts"]["new"], 0)
+        self.assertEqual(diff["counts"]["unchanged"], 1)
+
+    def test_count_increase_counts_as_new(self):
+        """A second occurrence that normalizes to the same identity is still new."""
+        from tollgate.baseline import diff_reports
+        f = self._f("uncapped_output", "medium", "LLM call has no max_tokens cap")
+        base = self._report([f])
+        cur = self._report([dict(f), dict(f)])   # two identical-identity findings
+        diff = diff_reports(cur, base)
+        self.assertEqual(diff["counts"]["new"], 1)
+        self.assertEqual(diff["new"][0]["occurrences"], 1)
+
+    def test_severity_worsening_is_flagged(self):
+        from tollgate.baseline import diff_reports
+        base = self._report([self._f("prompt_bloat", "low", "prompt is large", node_id="p")])
+        cur = self._report([self._f("prompt_bloat", "high", "prompt is large", node_id="p")])
+        diff = diff_reports(cur, base)
+        self.assertEqual(diff["counts"]["worsened"], 1)
+        self.assertEqual(diff["worsened"][0]["from_severity"], "low")
+        self.assertEqual(diff["worsened"][0]["to_severity"], "high")
+
+    def test_fixed_finding_reported_not_gated(self):
+        from tollgate.baseline import diff_reports
+        base = self._report([self._f("uncapped_output", "medium", "no cap on call A")])
+        cur = self._report([])
+        diff = diff_reports(cur, base)
+        self.assertEqual(diff["counts"]["fixed"], 1)
+        self.assertEqual(diff["counts"]["new"], 0)
+        self.assertEqual(diff["delta_gate"], "pass")
+
+    def test_identity_is_line_insensitive(self):
+        """An unrelated edit that shifts a finding's line must not make it 'new'."""
+        from tollgate.baseline import diff_reports
+        base = self._report([self._f("uncapped_output", "medium", "no cap", line=10)])
+        cur = self._report([self._f("uncapped_output", "medium", "no cap", line=42)])
+        diff = diff_reports(cur, base)
+        self.assertEqual(diff["counts"]["new"], 0)
+        self.assertEqual(diff["counts"]["unchanged"], 1)
+
+    def test_identity_normalizes_digits_in_message(self):
+        """A changed token-count inside the message must not fork one issue."""
+        from tollgate.baseline import diff_reports
+        base = self._report([self._f("prompt_bloat", "medium", "prompt is 1200 tokens", node_id="p")])
+        cur = self._report([self._f("prompt_bloat", "medium", "prompt is 1530 tokens", node_id="p")])
+        diff = diff_reports(cur, base)
+        self.assertEqual(diff["counts"]["new"], 0)
+        self.assertEqual(diff["counts"]["unchanged"], 1)
+
+    def test_empty_baseline_treats_all_as_new(self):
+        from tollgate.baseline import diff_reports
+        cur = self._report([self._f("recursive_loop", "critical", "Cycle x", node_id="x")])
+        diff = diff_reports(cur, {})        # no 'results' key -> empty baseline
+        self.assertEqual(diff["counts"]["new"], 1)
+        self.assertEqual(diff["delta_gate"], "block")
+
+    def test_lint_results_are_included(self):
+        from tollgate.baseline import diff_reports
+        lr = [{"source_path": "/repo/agent.js",
+               "findings": [self._f("unbounded_loop", "critical", "while(true) wraps a call",
+                                    source_path="/repo/agent.js")]}]
+        base = self._report([])
+        cur = self._report([], lint=lr)
+        diff = diff_reports(cur, base)
+        self.assertEqual(diff["counts"]["new"], 1)
+        self.assertEqual(diff["delta_gate"], "block")
+
+
+class TestBaselineEndToEnd(unittest.TestCase):
+    """Through the real pipeline: produce a baseline report, mutate the source,
+    and confirm the delta gate / exit code behave correctly."""
+
+    def _write(self, d, body):
+        p = os.path.join(d, "agent.py")
+        with open(p, "w", encoding="utf-8") as fh:
+            fh.write(body)
+        return p
+
+    _CAPPED = ("import openai\n"
+               "def s(t):\n"
+               "    return openai.chat.completions.create(model='gpt-4o', max_tokens=500,"
+               " messages=[{'role':'user','content':t}])\n")
+    _ONE_UNCAPPED = ("import openai\n"
+                     "def s(t):\n"
+                     "    return openai.chat.completions.create(model='gpt-4o',"
+                     " messages=[{'role':'user','content':t}])\n")
+    _REGRESSION = _ONE_UNCAPPED + (
+        "def loop(t):\n"
+        "    while True:\n"
+        "        r = openai.chat.completions.create(model='gpt-4o',"
+        " messages=[{'role':'user','content':t}])\n"
+        "        t = r.choices[0].message.content\n")
+
+    def _run(self, d):
+        return analyze_path([d], cfg=Config(trials=200))
+
+    def test_no_change_passes_even_on_risky_repo(self):
+        import tempfile
+        from tollgate.pipeline import apply_baseline
+        with tempfile.TemporaryDirectory() as d:
+            self._write(d, self._REGRESSION)
+            baseline = self._run(d).to_dict()
+            run = self._run(d)
+            apply_baseline(run, baseline, Config())
+            self.assertEqual(run.gate_decision, "block")        # repo is risky
+            self.assertEqual(run.effective_gate, "pass")        # but nothing new
+            self.assertEqual(run.baseline_diff["counts"]["new"], 0)
+
+    def test_regression_blocks_via_effective_gate(self):
+        import tempfile
+        from tollgate.pipeline import apply_baseline
+        with tempfile.TemporaryDirectory() as d:
+            self._write(d, self._ONE_UNCAPPED)
+            baseline = self._run(d).to_dict()
+            self._write(d, self._REGRESSION)                    # add loop + 2nd call
+            run = self._run(d)
+            apply_baseline(run, baseline, Config())
+            self.assertEqual(run.effective_gate, "block")
+            self.assertGreaterEqual(run.baseline_diff["counts"]["new"], 1)
+
+    def test_fix_shows_as_fixed_and_passes(self):
+        import tempfile
+        from tollgate.pipeline import apply_baseline
+        with tempfile.TemporaryDirectory() as d:
+            self._write(d, self._ONE_UNCAPPED)
+            baseline = self._run(d).to_dict()
+            self._write(d, self._CAPPED)                        # add the cap
+            run = self._run(d)
+            apply_baseline(run, baseline, Config())
+            self.assertEqual(run.effective_gate, "pass")
+            self.assertEqual(run.baseline_diff["counts"]["fixed"], 1)
+
+    def test_to_dict_and_reporters_carry_delta(self):
+        import tempfile
+        from tollgate import report
+        from tollgate.pipeline import apply_baseline
+        with tempfile.TemporaryDirectory() as d:
+            self._write(d, self._ONE_UNCAPPED)
+            baseline = self._run(d).to_dict()
+            self._write(d, self._REGRESSION)
+            run = self._run(d)
+            apply_baseline(run, baseline, Config())
+            self.assertIn("baseline_diff", run.to_dict())
+            self.assertIn("Tollgate PR check", report.to_markdown(run))
+            self.assertIn("Tollgate PR check", report.to_terminal(run))
+            self.assertIn("Tollgate PR check", report.to_html(run))
+
+
 if __name__ == "__main__":
     unittest.main()

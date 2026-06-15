@@ -25,6 +25,17 @@ inputs:
     description: "block | warn | never — gate severity that fails the check."
     required: false
     default: "block"
+  pr-delta:
+    description: "PR-delta mode: on pull_request, build a baseline from the base
+      commit and gate only on NEW/worsened findings (pre-existing risk never fails
+      the PR). true/false."
+    required: false
+    default: "false"
+  baseline:
+    description: "Explicit path to a baseline report.json for PR-delta gating.
+      Overrides pr-delta auto-baseline when set."
+    required: false
+    default: ""
   comment:
     description: "Post/update a PR comment with the report (true/false)."
     required: false
@@ -62,6 +73,27 @@ runs:
         ARGS="${{ inputs.paths }}"
         [ -n "${{ inputs.config }}" ] && ARGS="$ARGS --config ${{ inputs.config }}"
         [ -n "${{ inputs.models }}" ] && ARGS="$ARGS --models ${{ inputs.models }}"
+
+        # --- PR-delta: gate on the change, not the whole repo --------------------
+        BASELINE="${{ inputs.baseline }}"
+        if [ -z "$BASELINE" ] && [ "${{ inputs.pr-delta }}" = "true" ] \
+           && [ "${{ github.event_name }}" = "pull_request" ]; then
+          BASE_SHA="${{ github.event.pull_request.base.sha }}"
+          echo "PR-delta: building baseline from base commit $BASE_SHA"
+          git fetch --no-tags --depth=1 origin "$BASE_SHA" >/dev/null 2>&1 || true
+          rm -rf /tmp/tg-base
+          if git worktree add --detach /tmp/tg-base "$BASE_SHA" >/dev/null 2>&1; then
+            BARGS="${{ inputs.paths }}"
+            [ -n "${{ inputs.config }}" ] && BARGS="$BARGS --config ${{ inputs.config }}"
+            [ -n "${{ inputs.models }}" ] && BARGS="$BARGS --models ${{ inputs.models }}"
+            ( cd /tmp/tg-base && tollgate analyze $BARGS -o json="$GITHUB_WORKSPACE/tollgate-baseline.json" >/dev/null 2>&1 )
+            [ -s tollgate-baseline.json ] && BASELINE="tollgate-baseline.json"
+            git worktree remove --force /tmp/tg-base >/dev/null 2>&1 || true
+          fi
+          [ -z "$BASELINE" ] && echo "PR-delta: baseline unavailable; gating on the full repo instead."
+        fi
+        [ -n "$BASELINE" ] && ARGS="$ARGS --baseline $BASELINE"
+
         tollgate analyze $ARGS \
           --fail-on "${{ inputs.fail-on }}" \
           -f terminal \

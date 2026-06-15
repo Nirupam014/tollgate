@@ -92,6 +92,7 @@ class RunResult:
     lint_results: List["LintResult"] = field(default_factory=list)
     detected_prompts: List["DetectedPrompt"] = field(default_factory=list)  # advisory
     fingerprint: Optional[str] = None     # tamper-evident digest of inputs + verdict
+    baseline_diff: Optional[Dict] = None  # PR-delta vs a baseline report (if --baseline)
 
     @property
     def gate_decision(self) -> str:
@@ -110,8 +111,16 @@ class RunResult:
         return max([r.risk.score for r in self.results]
                    + [lr.score for lr in self.lint_results], default=0)
 
+    @property
+    def effective_gate(self) -> str:
+        """The gate CI should act on: the delta gate when running against a
+        baseline (PR mode), otherwise the whole-repo gate."""
+        if self.baseline_diff is not None:
+            return self.baseline_diff.get("delta_gate", self.gate_decision)
+        return self.gate_decision
+
     def to_dict(self):
-        return {
+        d = {
             "gate_decision": self.gate_decision,
             "max_score": self.max_score,
             "workflow_count": len(self.results),
@@ -122,6 +131,9 @@ class RunResult:
             "lint_results": [lr.to_dict() for lr in self.lint_results],
             "detected_prompts": [p.to_dict() for p in self.detected_prompts],
         }
+        if self.baseline_diff is not None:
+            d["baseline_diff"] = self.baseline_diff
+        return d
 
     def verdict_digest(self) -> str:
         """A canonical, order-stable digest of just the *verdict* (gate, scores,
@@ -269,6 +281,21 @@ def analyze_path(paths, cfg: Optional[Config] = None,
     if cfg.prompt_scan:
         run.detected_prompts = _scan_prompts(paths, cfg)
     run.fingerprint = _fingerprint(run, cfg)
+    return run
+
+
+def apply_baseline(run: "RunResult", baseline: Dict, cfg: Optional[Config] = None) -> "RunResult":
+    """Attach a PR-delta diff (current run vs a baseline report dict) to the run.
+
+    After this call ``run.baseline_diff`` is populated and ``run.effective_gate``
+    returns the delta gate (new/worsened findings only) instead of the whole-repo
+    gate. Pure data-over-data; safe for every language layer."""
+    from .baseline import diff_reports
+    cfg = cfg or Config()
+    run.baseline_diff = diff_reports(
+        run.to_dict(), baseline,
+        block_at_score=cfg.block_at_score, warn_at_score=cfg.warn_at_score,
+    )
     return run
 
 

@@ -37,9 +37,81 @@ def to_json(run: RunResult, indent: int = 2) -> str:
     return json.dumps(run.to_dict(), indent=indent)
 
 
+# --- PR-delta (baseline) section ----------------------------------------------
+def _delta_section_md(run: RunResult) -> List[str]:
+    """Headline PR-delta block when the run was diffed against a baseline. This is
+    the verdict CI acts on in PR mode: only new/worsened findings can fail."""
+    diff = getattr(run, "baseline_diff", None)
+    if diff is None:
+        return []
+    gate = diff.get("delta_gate", "pass")
+    c = diff.get("counts", {})
+    out = [
+        f"## {_GATE_EMOJI.get(gate,'')} Tollgate PR check: **{gate.upper()}** — "
+        f"{c.get('new',0)} new, {c.get('worsened',0)} worsened, {c.get('fixed',0)} fixed",
+        "",
+        "_Gating on the **change only**: pre-existing findings "
+        f"({c.get('unchanged',0)} unchanged) are reported but never fail this check._",
+        "",
+    ]
+    new = diff.get("new", [])
+    if new:
+        out += ["**🆕 New findings**", "",
+                "| Severity | Category | Location | Detail |", "|---|---|---|---|"]
+        for f in new[:30]:
+            occ = f.get("occurrences")
+            extra = f" ×{occ}" if occ and occ > 1 else ""
+            out.append(f"| {_SEV_EMOJI.get(f.get('severity'),'')} {f.get('severity','').upper()}{extra} "
+                       f"| {f.get('category','')} | {_loc(f)} | {_md_cell(f.get('message',''))} |")
+        if len(new) > 30:
+            out.append(f"| … | … | … | (+{len(new)-30} more) |")
+        out.append("")
+    worsened = diff.get("worsened", [])
+    if worsened:
+        out += ["**⬆️ Worsened (severity increased)**", "",
+                "| Change | Category | Location | Detail |", "|---|---|---|---|"]
+        for f in worsened[:30]:
+            out.append(f"| {f.get('from_severity','')} → **{f.get('to_severity','')}** "
+                       f"| {f.get('category','')} | {_loc(f)} | {_md_cell(f.get('message',''))} |")
+        out.append("")
+    fixed = diff.get("fixed", [])
+    if fixed:
+        out.append(f"<details><summary>✅ Fixed in this change ({c.get('fixed',0)})</summary>")
+        out.append("")
+        for f in fixed[:30]:
+            out.append(f"- `{f.get('severity','')}` **{f.get('category','')}** {_loc(f)} — "
+                       f"{_md_cell(f.get('message',''))}")
+        out.append("")
+        out.append("</details>")
+        out.append("")
+    out.append(f"<sub>Repo-wide gate (for context): **{run.gate_decision.upper()}** "
+               f"(max score {run.max_score}/100). PR-delta vs baseline "
+               f"<code>{(diff.get('baseline_fingerprint') or '')[:12]}…</code>.</sub>")
+    out.append("")
+    out.append("---")
+    out.append("")
+    return out
+
+
+def _loc(f: Dict) -> str:
+    path = (f.get("source_path") or "").split("/")[-1]
+    node = f.get("node_id")
+    line = f.get("line")
+    if path and line:
+        return f"`{path}:{line}`"
+    if path and node:
+        return f"`{path}` (`{node}`)"
+    if path:
+        return f"`{path}`"
+    if node:
+        return f"`{node}`"
+    return "—"
+
+
 # --- Markdown (PR/MR comment + job summary) ------------------------------------
 def to_markdown(run: RunResult) -> str:
     lines: List[str] = []
+    lines += _delta_section_md(run)
     gate = run.gate_decision
     lines.append(f"## {_GATE_EMOJI.get(gate, '')} Tollgate — deployment risk: **{gate.upper()}** "
                  f"(max score {run.max_score}/100)")
@@ -232,6 +304,22 @@ def _workflow_section(r: AnalysisResult) -> List[str]:
 # --- Terminal ------------------------------------------------------------------
 def to_terminal(run: RunResult) -> str:
     lines = []
+    diff = getattr(run, "baseline_diff", None)
+    if diff is not None:
+        c = diff.get("counts", {})
+        lines.append(f"Tollgate PR check — delta gate: {diff.get('delta_gate','pass').upper()}  "
+                     f"({c.get('new',0)} new, {c.get('worsened',0)} worsened, "
+                     f"{c.get('fixed',0)} fixed, {c.get('unchanged',0)} unchanged)")
+        for f in diff.get("new", [])[:15]:
+            occ = f.get("occurrences")
+            extra = f" x{occ}" if occ and occ > 1 else ""
+            lines.append(f"    NEW  {f.get('severity','').upper():<8}{extra} {f.get('category','')} "
+                         f"{_term_loc(f)}: {_term_snip(f.get('message',''))}")
+        for f in diff.get("worsened", [])[:15]:
+            lines.append(f"    UP   {f.get('from_severity','')}->{f.get('to_severity','')} "
+                         f"{f.get('category','')} {_term_loc(f)}")
+        lines.append(f"  (repo-wide gate: {run.gate_decision.upper()}, max score {run.max_score}/100)")
+        lines.append("")
     lines.append(f"Tollgate — gate: {run.gate_decision.upper()} (max score {run.max_score}/100)")
     if run.fingerprint:
         lines.append(f"  fingerprint: {run.fingerprint[:16]}…  (verify: tollgate verify)")
@@ -281,6 +369,12 @@ def to_terminal(run: RunResult) -> str:
 def _term_snip(text: str, limit: int = 120) -> str:
     one_line = " ".join((text or "").split())
     return one_line if len(one_line) <= limit else one_line[: limit - 1] + "…"
+
+
+def _term_loc(f: Dict) -> str:
+    path = (f.get("source_path") or "").split("/")[-1]
+    suffix = f":{f['line']}" if f.get("line") else (f"@{f['node_id']}" if f.get("node_id") else "")
+    return f"{path}{suffix}" if path else suffix
 
 
 # --- SARIF (GitHub code scanning) ----------------------------------------------

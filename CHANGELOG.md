@@ -7,6 +7,17 @@ All notable changes to this project are documented here. The format follows
 ## [Unreleased]
 
 ### Added
+- **PR-delta gating (`--baseline`).** Gate on the *change*, not the whole repo: a
+  fresh run is diffed against a baseline report and only **new or worsened**
+  findings can fail the build — pre-existing risk in untouched code is reported as
+  `unchanged` and never blocks the PR (resolved findings show as `fixed`). Finding
+  identity is line-number-independent (category + file + node + digit-normalized
+  message) and occurrence-counted, so unrelated edits don't look "new" while a real
+  new occurrence still counts. The delta is the headline of the markdown/terminal/
+  HTML reports and is serialized under `baseline_diff` in JSON. The GitHub Action
+  gains `pr-delta: true` (auto-builds the baseline from the PR's base commit) and a
+  `baseline:` input. CLI: `tollgate analyze … --baseline report.json`. Works
+  identically across every language layer (graph, Python AST lint, textual lint).
 - **Language-agnostic agentic lint.** Beyond Python's AST checks, the linter now
   runs a deterministic textual pass on any other language (JS/TS, Go, Java, Ruby,
   …) that flags the two universal risks — an infinite loop wrapping an LLM call,

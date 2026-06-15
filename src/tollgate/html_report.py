@@ -323,6 +323,7 @@ def build_dashboard_data(run: RunResult) -> Dict[str, Any]:
         "prompt_reviews": prompt_rows,
         "prompt_tokens_saved": prompt_tokens_saved,
         "detected_prompts": d.get("detected_prompts", []),
+        "baseline_diff": d.get("baseline_diff"),
     }
 
 
@@ -420,6 +421,18 @@ BASE_CSS = r"""
     background:var(--accent);color:#fff;font-size:10px;font-weight:700;font-style:normal;
     display:flex;align-items:center;justify-content:center;font-family:Georgia,serif}
   .note b{color:var(--text);font-weight:600}
+  /* ---- PR-delta banner ---- */
+  .delta{border:1px solid var(--line);border-radius:16px;padding:16px 18px;margin-bottom:22px;
+    box-shadow:var(--shadow);background:var(--panel)}
+  .delta.block{border-left:5px solid var(--bad);background:var(--bad-soft)}
+  .delta.warn{border-left:5px solid var(--warn);background:#fdf4e7}
+  .delta.pass{border-left:5px solid var(--good);background:var(--good-soft)}
+  .delta .dh{display:flex;align-items:center;gap:10px;flex-wrap:wrap;font-weight:700;font-size:15px}
+  .delta .counts{display:flex;gap:8px;margin:12px 0 4px;flex-wrap:wrap}
+  .delta .ct{padding:4px 11px;border-radius:20px;font-size:12px;font-weight:600;border:1px solid var(--line);background:#fff}
+  .delta .ct.n{color:#b42318} .delta .ct.w{color:#b45309} .delta .ct.f{color:#067a55} .delta .ct.u{color:var(--muted)}
+  .delta table{margin-top:10px;background:#fff;border-radius:10px;overflow:hidden}
+  .delta .sub{color:var(--muted);font-size:12px;margin-top:6px}
   .barwrap{height:230px}
   .empty{color:var(--faint);font-size:13px;padding:22px 6px;text-align:center}
   .caret{display:inline-block;width:12px;color:var(--faint);transition:transform .15s}
@@ -491,6 +504,8 @@ __BASE_CSS__
     </div>
     <div id="gateBadge"></div>
   </header>
+
+  <div id="deltaBanner"></div>
 
   <div class="kpis" id="kpis"></div>
 
@@ -571,6 +586,41 @@ if (D.fingerprint) { const _fp=document.getElementById('fpLine'); if(_fp) _fp.in
            '</td><td>'+(p.est_tokens||0).toLocaleString()+'</td><td>'+esc((p.reasons||[]).slice(0,3).join(', '))+'</td></tr>';
   }).join('');
   document.getElementById('dpCount').textContent = dp.length + ' · ~' + tot.toLocaleString() + ' tokens';
+})();
+// --- PR-delta banner (only when run against a baseline) ----------------------
+(function(){
+  const bd = D.baseline_diff;
+  if (!bd) return;
+  const el = document.getElementById('deltaBanner');
+  const g = bd.delta_gate || 'pass';
+  const c = bd.counts || {};
+  const dloc = f => {
+    const p = (f.source_path||'').split('/').pop();
+    const sfx = f.line ? (':'+f.line) : (f.node_id ? (' @'+f.node_id) : '');
+    return p ? (p+sfx) : (sfx||'—');
+  };
+  const newRows = (bd.new||[]).slice(0,20).map(f=>{
+    const occ = (f.occurrences && f.occurrences>1) ? (' ×'+f.occurrences) : '';
+    return '<tr><td><span class="sev '+esc(f.severity)+'">'+esc(f.severity)+occ+'</span></td>'+
+      '<td><span class="tag">'+esc(f.category)+'</span></td><td class="loc">'+esc(dloc(f))+
+      '</td><td>'+esc(f.message)+'</td></tr>';
+  }).join('');
+  const worRows = (bd.worsened||[]).slice(0,20).map(f=>
+    '<tr><td>'+esc(f.from_severity)+' → <b>'+esc(f.to_severity)+'</b></td>'+
+    '<td><span class="tag">'+esc(f.category)+'</span></td><td class="loc">'+esc(dloc(f))+
+    '</td><td>'+esc(f.message)+'</td></tr>').join('');
+  let html = '<div class="delta '+g+'">'+
+    '<div class="dh"><span class="dot"></span>Tollgate PR check: '+g.toUpperCase()+
+    '<span class="sub" style="margin-left:auto">gates on the change only — pre-existing issues never fail this check</span></div>'+
+    '<div class="counts"><span class="ct n">'+(c.new||0)+' new</span>'+
+    '<span class="ct w">'+(c.worsened||0)+' worsened</span>'+
+    '<span class="ct f">'+(c.fixed||0)+' fixed</span>'+
+    '<span class="ct u">'+(c.unchanged||0)+' unchanged</span></div>';
+  if (newRows) html += '<table><thead><tr><th>Severity</th><th>Type</th><th>Location</th><th>New finding</th></tr></thead><tbody>'+newRows+'</tbody></table>';
+  if (worRows) html += '<table><thead><tr><th>Change</th><th>Type</th><th>Location</th><th>Worsened finding</th></tr></thead><tbody>'+worRows+'</tbody></table>';
+  html += '<div class="sub">Repo-wide gate (for context): <b>'+esc((bd.full_gate||'').toUpperCase())+'</b>. '+
+    'Baseline '+esc((bd.baseline_fingerprint||'').slice(0,12))+'…</div></div>';
+  el.innerHTML = html;
 })();
 const fmtBig = n => { n=Number(n||0); return n>=1e9?(n/1e9).toFixed(1)+'B':n>=1e6?(n/1e6).toFixed(1)+'M':n>=1e3?(n/1e3).toFixed(1)+'K':(''+Math.round(n)); };
 const loc = (f,l) => f ? (esc(f)+(l?(':'+l):'')) : '—';

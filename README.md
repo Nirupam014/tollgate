@@ -49,12 +49,14 @@ pip install ./tollgate                # from source
 ```bash
 tollgate analyze ./agents ./prompts --fail-on block   # scan & gate
 tollgate analyze ./agents --traffic-per-week 50000    # set the traffic estimate
+tollgate analyze ./agents --baseline base.json        # PR-delta: gate only NEW risk
 tollgate init                                         # write a starter .tollgate.yml
 tollgate models                                       # inspect the model catalog
 tollgate verify report.json ./agents                  # re-derive & detect a tampered/stale report
 ```
 
 Exit codes: `0` pass/warn, `1` block (or warn with `--fail-on warn`), `2` usage error.
+With `--baseline`, the exit code reflects the **delta gate** (new/worsened findings only).
 
 Try the bundled examples:
 
@@ -80,6 +82,34 @@ and always deletes the clone. It never modifies the scanned repo.
 - **GitHub:** add `.github/workflows/tollgate.yml` (see `ci-templates/github-workflow.yml`); posts a sticky PR comment, uploads SARIF, fails the check on `block`. Make it a required status check to block merges.
 - **GitLab:** add `ci-templates/.gitlab-ci.yml`; publishes a Code Quality report and fails the pipeline on `block`.
 - **Local:** `ci-templates/.pre-commit-hooks.yaml`.
+
+## PR-delta gating — gate the change, not the repo
+
+Blocking a pull request on pre-existing issues the author never touched is exactly
+how CI gates get switched off. In PR mode Tollgate answers the right question —
+*does this change make things worse?* — by diffing the run against a **baseline**
+report and gating only on **new or worsened** findings. Pre-existing findings are
+reported as `unchanged` and never fail the check; resolved ones show up as `fixed`.
+
+```bash
+# On your default branch (or any reference point), capture a baseline:
+tollgate analyze ./agents ./prompts -o json=tollgate-baseline.json
+
+# In the PR, gate on the delta — only NEW/worsened findings can fail the build:
+tollgate analyze ./agents ./prompts --baseline tollgate-baseline.json --fail-on block
+```
+
+In GitHub Actions just set `pr-delta: "true"` (and `fetch-depth: 0` on checkout):
+the Action builds the baseline from the PR's base commit automatically, so a PR
+that introduces a new unbounded loop is blocked while a legacy one in untouched
+code is reported but doesn't fail the merge. The delta is shown as the headline of
+the PR comment / dashboard, with the whole-repo gate kept for context.
+
+Finding identity is **line-number-independent** (category + file + node + a
+digit-normalized message), so unrelated edits above a finding don't make it look
+new, while a genuinely new occurrence — even one that normalizes to an existing
+issue — still counts. It is pure data-over-data, so it works the same for every
+language layer (graph findings, Python AST lint, the language-agnostic textual lint).
 
 ## Configuration — `.tollgate.yml`
 
