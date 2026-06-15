@@ -7,6 +7,20 @@ All notable changes to this project are documented here. The format follows
 ## [Unreleased]
 
 ### Added
+- **Multi-language graph analysis — JavaScript/TypeScript.** JS/TS agents are now
+  recovered into the same Workflow IR as Python and run through the *same* graph
+  detectors (recursive/loop cycles via Tarjan SCC, context explosion, fan-out),
+  token prediction, simulation, and scoring — not just the advisory textual lint.
+  Two real shapes are recovered, deterministically and stdlib-only (no Node, no
+  tree-sitter): **LangGraph.js / `StateGraph`** builders (`addNode` / `addEdge` /
+  `addConditionalEdges` / `setEntryPoint`, with back-edges classified as unbounded
+  cycles) and **imperative agents** (an infinite `while`/`for` loop around an LLM
+  SDK call). A comment/string-aware blanker means builder calls inside comments or
+  strings are never mistaken for real edges. Files it can't recover fall back to the
+  textual lint (honest failure — never a fabricated graph). New parser
+  `parsers/javascript.py`; `.js/.jsx/.ts/.tsx/.mjs/.cjs` join discovery; cap/output
+  lint is merged into JS workflows without double-counting loops. A general
+  tree-sitter backend for arbitrary JS/TS control flow remains a future option.
 - **PR-delta gating (`--baseline`).** Gate on the *change*, not the whole repo: a
   fresh run is diffed against a baseline report and only **new or worsened**
   findings can fail the build — pre-existing risk in untouched code is reported as

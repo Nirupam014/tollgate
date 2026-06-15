@@ -23,6 +23,7 @@ from .forecast import build_forecast, Forecast
 from .ir import Workflow
 from .parsers import discover, parse_file
 from .parsers import _SKIP_DIR_SEGMENTS  # noqa: reuse the scan dir-prune set
+from .parsers.javascript import JS_EXTS
 from .policy import PolicyEngine, load_policies
 from .prompt_scan import DetectedPrompt, SCANNABLE_EXTS, scan_file
 from .prediction import PredictionEngine, WorkflowPrediction
@@ -203,7 +204,11 @@ def analyze_workflow(wf: Workflow, cfg: Optional[Config] = None,
     # already owns recursive_loop / fanout, so only the non-overlapping lint
     # categories are merged here to avoid double-counting.
     lint_findings: List[Finding] = []
-    if cfg.agentic_lint and wf.source_path and wf.source_path.endswith(".py"):
+    _ext = os.path.splitext(wf.source_path)[1].lower() if wf.source_path else ""
+    if cfg.agentic_lint and wf.source_path and (_ext == ".py" or _ext in JS_EXTS):
+        # Merge only the non-overlapping cap/output/fanout categories. Loop
+        # findings are owned by the graph detectors (recursive_loop), so the
+        # linter's unbounded_loop is intentionally excluded to avoid double count.
         lint_findings = [f for f in lint_source(wf.source_path, cfg.lint_strictness)
                          if f.category in LINT_MERGE_CATEGORIES]
         findings = findings + lint_findings
@@ -277,7 +282,11 @@ def analyze_path(paths, cfg: Optional[Config] = None,
         if lr is not None:
             run.lint_results.append(lr)
     if cfg.agentic_lint:
-        run.lint_results.extend(_lint_non_python(paths, cfg))
+        # Files already recovered into a workflow graph are analyzed (and their
+        # cap/output lint merged) above — don't also textual-lint them, or loops
+        # would be double-reported.
+        parsed = {r.source_path for r in run.results if r.source_path}
+        run.lint_results.extend(_lint_non_python(paths, cfg, skip_paths=parsed))
     if cfg.prompt_scan:
         run.detected_prompts = _scan_prompts(paths, cfg)
     run.fingerprint = _fingerprint(run, cfg)
@@ -299,12 +308,16 @@ def apply_baseline(run: "RunResult", baseline: Dict, cfg: Optional[Config] = Non
     return run
 
 
-def _lint_non_python(paths, cfg: Config) -> List["LintResult"]:
+def _lint_non_python(paths, cfg: Config, skip_paths=None) -> List["LintResult"]:
     """Run the language-agnostic textual linter over non-Python source (.py is
     already covered by discovery + the AST linter). Advisory, like the Python
-    lint-only path: a LintResult only when the file is agentic and has findings."""
+    lint-only path: a LintResult only when the file is agentic and has findings.
+
+    ``skip_paths`` are files already recovered into a workflow graph (e.g. a
+    LangGraph.js file), whose structural findings come from the detectors — they
+    must not also be textual-linted here."""
     out: List[LintResult] = []
-    seen = set()
+    seen = set(skip_paths or ())
     scorer = RiskScorer(block_at_score=cfg.block_at_score, warn_at_score=cfg.warn_at_score)
 
     def consider(fp: str):

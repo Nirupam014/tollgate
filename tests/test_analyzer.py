@@ -1213,5 +1213,106 @@ class TestBaselineEndToEnd(unittest.TestCase):
             self.assertIn("Tollgate PR check", report.to_html(run))
 
 
+class TestJavaScriptGraph(unittest.TestCase):
+    """Multi-language graph recovery: JS/TS LangGraph.js graphs and imperative
+    loop-around-LLM-call agents are parsed into the same IR and run through the
+    same detectors/prediction/scoring as Python."""
+
+    AGENTS = os.path.join(ROOT, "examples", "agents")
+
+    def _wf(self, name):
+        return parse_file(os.path.join(self.AGENTS, name))
+
+    def test_langgraph_js_cycle_recovered_and_blocks(self):
+        wf = self._wf("langgraph_react.js")
+        self.assertEqual(wf.source_kind, "langgraph-js")
+        self.assertEqual(set(wf.node_ids), {"agent", "tools"})
+        self.assertEqual(wf.nodes[0].intended_model, "gpt-4o")   # model recovered
+        self.assertTrue(any(e.edge_type == "loop" for e in wf.edges))
+        res = analyze_workflow(wf, cfg=Config(trials=200))
+        self.assertEqual(res.risk.gate_decision, "block")
+        self.assertTrue(any(f.category == "recursive_loop" for f in res.findings))
+
+    def test_langgraph_ts_linear_passes(self):
+        wf = self._wf("langgraph_pipeline.ts")
+        self.assertEqual(wf.source_kind, "langgraph-js")
+        self.assertEqual(wf.node_ids, ["extract", "summarize"])
+        self.assertFalse(any(e.edge_type == "loop" for e in wf.edges))
+        res = analyze_workflow(wf, cfg=Config(trials=200))
+        self.assertEqual(res.risk.gate_decision, "pass")
+
+    def test_imperative_js_loop_recovered_and_blocks(self):
+        wf = self._wf("imperative_loop.js")
+        self.assertEqual(len(wf.llm_nodes()), 1)
+        self.assertTrue(any(e.edge_type == "loop" and e.guard is None for e in wf.edges))
+        res = analyze_workflow(wf, cfg=Config(trials=200))
+        self.assertEqual(res.risk.gate_decision, "block")
+        self.assertTrue(any(f.category == "recursive_loop" for f in res.findings))
+
+    def test_non_graph_js_is_honest_failure(self):
+        """An uncapped call with no loop/graph is NOT force-parsed into a graph."""
+        from tollgate.parsers.javascript import parse_javascript
+        import tempfile
+        src = ("import OpenAI from 'openai';\n"
+               "export async function f(t){ return await openai.chat.completions."
+               "create({model:'gpt-4o', messages:[{role:'user',content:t}]}); }\n")
+        with tempfile.TemporaryDirectory() as d:
+            p = os.path.join(d, "helper.js")
+            with open(p, "w") as fh:
+                fh.write(src)
+            wf = parse_javascript(p)
+            self.assertEqual(wf.nodes, [])           # empty -> dropped -> lint
+
+    def test_blanker_ignores_builders_in_strings_and_comments(self):
+        """addNode/addEdge inside a comment or string must not become a graph."""
+        from tollgate.parsers.javascript import parse_javascript
+        import tempfile
+        src = ('import { StateGraph } from "x";\n'
+               '// g.addNode("ghost", fn); g.addEdge("ghost","gone");\n'
+               'const doc = "call g.addEdge(\\"a\\",\\"b\\") to wire it";\n')
+        with tempfile.TemporaryDirectory() as d:
+            p = os.path.join(d, "decoy.js")
+            with open(p, "w") as fh:
+                fh.write(src)
+            wf = parse_javascript(p)
+            self.assertEqual(wf.nodes, [])           # nothing real to recover
+
+    def test_discovery_picks_graph_js_skips_plain_and_dts(self):
+        from tollgate.parsers import _is_workflow_candidate
+        import tempfile
+        with tempfile.TemporaryDirectory() as d:
+            graph = os.path.join(d, "agent.js")
+            with open(graph, "w") as fh:
+                fh.write('import {StateGraph} from "x";\n'
+                         'new StateGraph(S).addNode("a",f).addEdge("a","b");\n')
+            plain = os.path.join(d, "util.js")
+            with open(plain, "w") as fh:
+                fh.write("export const add=(a,b)=>a+b;\n")
+            dts = os.path.join(d, "types.d.ts")
+            with open(dts, "w") as fh:
+                fh.write('export declare function addNode(x: string): void;\n')
+            self.assertTrue(_is_workflow_candidate(graph))
+            self.assertFalse(_is_workflow_candidate(plain))
+            self.assertFalse(_is_workflow_candidate(dts))
+
+    def test_no_double_count_graph_vs_lint(self):
+        """A JS file recovered as a workflow is not also textual-linted."""
+        run = analyze_path([os.path.join(self.AGENTS, "imperative_loop.js")],
+                           cfg=Config(trials=200))
+        self.assertEqual(len(run.results), 1)
+        self.assertEqual(run.lint_results, [])       # not linted again
+        loop_findings = [f for f in run.results[0].findings
+                         if f.category == "recursive_loop"]
+        self.assertEqual(len(loop_findings), 1)      # exactly one loop finding
+
+    def test_js_workflow_merges_uncapped_output(self):
+        """The graph file still surfaces the uncapped-output cap finding (merged)."""
+        run = analyze_path([os.path.join(self.AGENTS, "imperative_loop.js")],
+                           cfg=Config(trials=200))
+        cats = {f.category for f in run.results[0].findings}
+        self.assertIn("uncapped_output", cats)
+        self.assertIn("recursive_loop", cats)
+
+
 if __name__ == "__main__":
     unittest.main()
