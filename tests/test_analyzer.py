@@ -1342,14 +1342,21 @@ class TestCrossLanguageLint(unittest.TestCase):
         self.assertIn("uncapped_output", cats)
 
     def test_examples_block_via_pipeline(self):
-        """End to end: the three files surface as agentic-lint results that block."""
+        """End to end: each file blocks — via the textual lint when the tree-sitter
+        backend is absent, or via recovered graph when it's installed. Either way the
+        verdict must be BLOCK (and it must appear exactly once)."""
         run = analyze_path([self.AGENTS, ], cfg=Config(trials=120))
-        kinds = {lr.source_path.split("/")[-1]: lr for lr in run.lint_results}
-        for name, ext in (("loop_agent.go", "go"), ("LoopAgent.java", "java"),
-                          ("loop_agent.rb", "rb")):
-            self.assertIn(name, kinds, f"{name} not linted")
-            self.assertEqual(kinds[name].source_kind, f"agentic-lint:{ext}")
-            self.assertEqual(kinds[name].gate_decision, "block")
+        verdict = {}
+        for r in run.results:
+            verdict.setdefault(os.path.basename(r.source_path or ""), []).append(
+                r.risk.gate_decision)
+        for lr in run.lint_results:
+            verdict.setdefault(os.path.basename(lr.source_path or ""), []).append(
+                lr.gate_decision)
+        for name in ("loop_agent.go", "LoopAgent.java", "loop_agent.rb"):
+            self.assertIn(name, verdict, f"{name} produced no verdict")
+            self.assertEqual(len(verdict[name]), 1, f"{name} double-counted")
+            self.assertEqual(verdict[name][0], "block")
 
     def test_capped_bounded_go_is_quiet(self):
         from tollgate.agentic_lint import lint_source
@@ -1388,6 +1395,90 @@ class TestCrossLanguageLint(unittest.TestCase):
             with open(p, "w") as fh:
                 fh.write(src)
             self.assertEqual(lint_source(p), [])
+
+
+def _treesitter_available():
+    try:
+        from tollgate.parsers import treesitter_backend as tsb
+        return tsb.available()
+    except Exception:
+        return False
+
+
+@unittest.skipUnless(_treesitter_available(),
+                     "tree-sitter backend not installed (pip install 'tollgate[multilang]')")
+class TestTreeSitterGraph(unittest.TestCase):
+    """Real graph recovery for Go/Java/Ruby via the optional tree-sitter backend —
+    parity with the Python/JS parsers. Runs only where the `multilang` extra is
+    installed; skips cleanly otherwise."""
+
+    AGENTS = os.path.join(ROOT, "examples", "agents")
+
+    def _wf(self, name):
+        from tollgate.parsers import parse_treesitter
+        return parse_treesitter(os.path.join(self.AGENTS, name))
+
+    def _assert_self_loop_blocks(self, name, kind):
+        wf = self._wf(name)
+        self.assertEqual(wf.source_kind, kind)
+        self.assertEqual(len(wf.llm_nodes()), 1)
+        self.assertTrue(any(e.edge_type == "loop" and e.guard is None for e in wf.edges))
+        res = analyze_workflow(wf, cfg=Config(trials=150))
+        self.assertEqual(res.risk.gate_decision, "block")
+        self.assertTrue(any(f.category == "recursive_loop" for f in res.findings))
+
+    def test_go_imperative_loop(self):
+        self._assert_self_loop_blocks("loop_agent.go", "imperative-go")
+
+    def test_java_imperative_loop(self):
+        self._assert_self_loop_blocks("LoopAgent.java", "imperative-java")
+
+    def test_ruby_imperative_loop(self):
+        self._assert_self_loop_blocks("loop_agent.rb", "imperative-ruby")
+
+    def test_java_langgraph4j_cycle(self):
+        wf = self._wf("langgraph4j_react.java")
+        self.assertEqual(wf.source_kind, "langgraph4j")
+        self.assertEqual(set(wf.node_ids), {"agent", "tools"})
+        self.assertTrue(any(e.edge_type == "loop" for e in wf.edges))
+        res = analyze_workflow(wf, cfg=Config(trials=150))
+        self.assertEqual(res.risk.gate_decision, "block")
+        self.assertTrue(any(f.category == "recursive_loop" for f in res.findings))
+
+    def test_bounded_go_is_honest_failure(self):
+        """A bounded for-loop isn't an unbounded cycle -> no graph -> falls to lint."""
+        from tollgate.parsers import parse_treesitter
+        import tempfile
+        src = ("package main\n"
+               "func run(client *openai.Client) {\n"
+               "  for i := 0; i < 10; i++ {\n"
+               "    client.CreateChatCompletion(ctx, req)\n  }\n}\n")
+        with tempfile.TemporaryDirectory() as d:
+            p = os.path.join(d, "ok.go")
+            with open(p, "w") as fh:
+                fh.write(src)
+            self.assertEqual(parse_treesitter(p).nodes, [])
+
+    def test_non_agentic_go_is_empty(self):
+        from tollgate.parsers import parse_treesitter
+        import tempfile
+        src = "package main\nfunc add(a, b int) int { for {} ; return a + b }\n"
+        with tempfile.TemporaryDirectory() as d:
+            p = os.path.join(d, "util.go")
+            with open(p, "w") as fh:
+                fh.write(src)
+            self.assertEqual(parse_treesitter(p).nodes, [])   # no SDK call in loop
+
+    def test_no_double_count_graph_vs_lint(self):
+        run = analyze_path([os.path.join(self.AGENTS, "loop_agent.go")],
+                           cfg=Config(trials=150))
+        self.assertEqual(len(run.results), 1)         # recovered as a graph
+        self.assertEqual(run.lint_results, [])        # not also textual-linted
+        loops = [f for f in run.results[0].findings if f.category == "recursive_loop"]
+        self.assertEqual(len(loops), 1)
+        # cap finding still merged from the lint
+        self.assertIn("uncapped_output",
+                      {f.category for f in run.results[0].findings})
 
 
 if __name__ == "__main__":

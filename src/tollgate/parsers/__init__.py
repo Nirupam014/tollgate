@@ -13,12 +13,16 @@ from .crewai import parse_crewai, looks_like_crewai
 from .imperative import parse_imperative, has_imperative_llm, SDK_CALL_MARKERS
 from .javascript import (parse_javascript, is_js_workflow_source,
                          looks_like_langgraph_js, has_imperative_llm_js, JS_EXTS)
+from . import treesitter_backend as _tsb
+from .treesitter_multilang import (parse_treesitter, looks_like_ts_workflow,
+                                   TS_EXTS)
 
 __all__ = ["parse_file", "discover", "parse_dsl", "parse_prompt",
            "parse_langgraph", "parse_autogpt", "looks_like_autogpt",
            "parse_crewai", "looks_like_crewai",
            "parse_imperative", "has_imperative_llm",
-           "parse_javascript", "is_js_workflow_source"]
+           "parse_javascript", "is_js_workflow_source",
+           "parse_treesitter"]
 
 
 def parse_file(path: str, source_kind: Optional[str] = None) -> Workflow:
@@ -36,6 +40,8 @@ def parse_file(path: str, source_kind: Optional[str] = None) -> Workflow:
         return parse_imperative(path)
     if kind == "javascript":
         return parse_javascript(path)
+    if kind == "treesitter":
+        return parse_treesitter(path)
     if kind == "agentic":
         # Recognized agentic framework with no recoverable graph: return an empty
         # workflow (non-analyzable) so the pipeline routes it to the strict linter
@@ -61,6 +67,8 @@ def _detect_kind(path: str) -> str:
         return "prompt"
     if ext in JS_EXTS:
         return "javascript"
+    if ext in TS_EXTS:
+        return "treesitter"
     if ext == ".py":
         # LangGraph (framework graph) takes precedence; otherwise an imperative
         # hand-rolled agent (a loop around LLM SDK calls). Fall back to LangGraph's
@@ -94,7 +102,8 @@ def _detect_kind(path: str) -> str:
 
 # Files we will consider as workflow artifacts when scanning a directory/diff.
 _WORKFLOW_EXTS = (".yaml", ".yml", ".json", ".txt", ".md", ".jinja", ".j2", ".prompt",
-                  ".tmpl", ".py", ".js", ".jsx", ".ts", ".tsx", ".mjs", ".cjs")
+                  ".tmpl", ".py", ".js", ".jsx", ".ts", ".tsx", ".mjs", ".cjs",
+                  ".go", ".java", ".rb")
 
 # Unambiguous prompt-template extensions: always treated as a prompt.
 _PROMPT_EXTS = (".prompt", ".jinja", ".j2", ".tmpl")
@@ -200,6 +209,11 @@ def _is_workflow_candidate(path: str) -> bool:
         # imperative infinite loop around an LLM SDK call. Other JS still reaches
         # the advisory textual lint / prompt scan via the pipeline's own walk.
         return is_js_workflow_source(_read_head(path))
+    if ext in TS_EXTS:
+        # Go/Java/Ruby graph recovery needs the optional tree-sitter backend. When
+        # it's absent we DON'T claim the file as a workflow — it still reaches the
+        # advisory textual lint via the pipeline's own walk (honest failure).
+        return _tsb.available() and looks_like_ts_workflow(_read_head(path))
     if ext in _PROMPT_EXTS:
         return True
     if ext in _AMBIGUOUS_TEXT_EXTS:

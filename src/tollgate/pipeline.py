@@ -24,6 +24,7 @@ from .ir import Workflow
 from .parsers import discover, parse_file
 from .parsers import _SKIP_DIR_SEGMENTS  # noqa: reuse the scan dir-prune set
 from .parsers.javascript import JS_EXTS
+from .parsers.treesitter_multilang import TS_EXTS
 from .policy import PolicyEngine, load_policies
 from .prompt_scan import DetectedPrompt, SCANNABLE_EXTS, scan_file
 from .prediction import PredictionEngine, WorkflowPrediction
@@ -205,7 +206,8 @@ def analyze_workflow(wf: Workflow, cfg: Optional[Config] = None,
     # categories are merged here to avoid double-counting.
     lint_findings: List[Finding] = []
     _ext = os.path.splitext(wf.source_path)[1].lower() if wf.source_path else ""
-    if cfg.agentic_lint and wf.source_path and (_ext == ".py" or _ext in JS_EXTS):
+    if cfg.agentic_lint and wf.source_path and (_ext == ".py" or _ext in JS_EXTS
+                                                 or _ext in TS_EXTS):
         # Merge only the non-overlapping cap/output/fanout categories. Loop
         # findings are owned by the graph detectors (recursive_loop), so the
         # linter's unbounded_loop is intentionally excluded to avoid double count.
