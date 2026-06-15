@@ -6,6 +6,20 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+- **Cross-language lint now actually covers Go, Java, and Ruby.** The textual
+  pass recognized only Python/JS-shaped SDK calls and loop forms, so idiomatic
+  Go (`for {}` + `CreateChatCompletion`), Java (`while (true)` +
+  `chat().completions().create`), and Ruby (`loop do` + `client.chat(parameters:)`)
+  agents produced *nothing* — a silent miss. Added their loop forms and SDK call
+  shapes, broadened the agentic-signal gate accordingly, and added Go/Java
+  output-cap kwargs (`MaxTokens`, `maxCompletionTokens`, …). The textual pass now
+  scans a comment/string-blanked copy of the source, so a loop keyword or the word
+  "break" in a comment can no longer create or suppress a finding. New
+  Go/Java/Ruby examples + tests; the Ruby `.chat(` shape is guarded by its
+  `parameters:` signature to avoid false positives. (Graph recovery remains Python
+  + JS/TS; these languages get the advisory lint, not a graph.)
+
 ### Added
 - **Multi-language graph analysis — JavaScript/TypeScript.** JS/TS agents are now
   recovered into the same Workflow IR as Python and run through the *same* graph

@@ -108,6 +108,9 @@ _FRAMEWORKS: Dict[str, dict] = {
 _OUTPUT_CAP_KWARGS = {
     "max_tokens", "max_output_tokens", "max_completion_tokens",
     "max_new_tokens", "maxOutputTokens", "maxTokens", "max_tokens_to_sample",
+    # Go struct fields / Java builder setters use Pascal/camelCase.
+    "MaxTokens", "MaxCompletionTokens", "MaxOutputTokens",
+    "maxCompletionTokens", "maxOutputTokens",
 }
 
 # LangChain / LlamaIndex chat-model *constructors*. Code using these frameworks
@@ -200,7 +203,10 @@ def lint_source(path: str, strictness: str = "strict",
             return []
 
     frameworks = _detect_frameworks(source)
-    has_sdk = any(m in source for m in SDK_CALL_MARKERS)
+    # Agentic signal: a known framework, a Python/JS dotted SDK tail, or any of the
+    # cross-language SDK call shapes (Go / Java / Ruby) the textual pass recognizes.
+    has_sdk = (any(m in source for m in SDK_CALL_MARKERS)
+               or (not path.endswith(".py") and _has_textual_sdk(source)))
     if not frameworks and not has_sdk:
         return []  # no agentic signal -> stay silent
 
@@ -228,24 +234,111 @@ def lint_source(path: str, strictness: str = "strict",
 
 
 # --- language-agnostic textual checks (non-Python) ---------------------------
-# An infinite-loop header in C-family / Python / Go / Rust syntax. We only flag
-# *infinite* loops (while(true)/for(;;)/loop{) — a `for x of items` is bounded.
+# An infinite-loop header across C-family / Python / Go / Rust / Ruby syntax. We
+# only flag *infinite* loops; a bounded `for x of items` / `N.times` is not one.
+#   while(true) / while true   C-family, Python, Ruby (`while true`)
+#   for(;;)                     C / Java / JS
+#   for {                       Go
+#   loop {                      Rust
+#   loop do / until false       Ruby
 _INF_LOOP_RE = re.compile(
     r'(?im)(?:\bwhile\s*\(\s*(?:true|1)\s*\)|\bwhile\s+true\b|'
-    r'\bfor\s*\(\s*;\s*;\s*\)|\bfor\s*\{|\bloop\s*\{)')   # incl. Go `for {`
-# A recognized LLM SDK call by its dotted tail, followed by an open paren.
-_SDK_CALL_TEXT_RE = re.compile(
-    r'(?:' + r'|'.join(re.escape(m) for m in SDK_CALL_MARKERS) + r')\s*\(')
+    r'\bfor\s*\(\s*;\s*;\s*\)|\bfor\s*\{|\bloop\s*\{|'
+    r'\bloop\s+do\b|\buntil\s+false\b)')
+
+# Recognized LLM SDK call shapes across languages. The Python/JS dotted tails come
+# from SDK_CALL_MARKERS; the rest cover the idiomatic Go / Java / Ruby client
+# calls those markers miss. Longer alternatives are listed first so the regex
+# prefers the most specific match at a position. Each is matched followed by `(`.
+_TEXTUAL_SDK_FRAGMENTS = [re.escape(m) for m in SDK_CALL_MARKERS] + [
+    # Go — go-openai, Google generative-ai-go, anthropic-sdk-go.
+    r"CreateChatCompletionStream", r"CreateChatCompletion", r"CreateCompletion",
+    r"GenerateContentStream", r"GenerateContent", r"Messages\.New",
+    # Java — openai-java, anthropic-java (fluent `.completions().create(...)`),
+    # plus the older theokanning client.
+    r"completions\(\)\s*\.\s*create", r"messages\(\)\s*\.\s*create",
+    r"createChatCompletion",
+    # Ruby — ruby-openai `client.chat(parameters: {...})` (guarded below to avoid
+    # matching unrelated `.chat(` calls). anthropic/google ruby already covered.
+    r"\.chat",
+]
+_TEXTUAL_SDK_RE = re.compile(r"(?:" + r"|".join(_TEXTUAL_SDK_FRAGMENTS) + r")\s*\(")
+
+
+def _textual_sdk_calls(source: str):
+    """Yield (start, args_start, call_name) for each recognized SDK call in any
+    language. The Ruby `.chat(` shape is confirmed by its `parameters:` keyword so
+    a generic `.chat(` elsewhere isn't mistaken for an LLM call."""
+    for m in _TEXTUAL_SDK_RE.finditer(source):
+        name = m.group(0).rstrip("( \t").lstrip(".")
+        if name == "chat" and "parameters" not in source[m.end():m.end() + 48]:
+            continue
+        yield m.start(), m.end(), name
+
+
+def _has_textual_sdk(text: str) -> bool:
+    return next(_textual_sdk_calls(text), None) is not None
 
 
 def _line_at(text: str, idx: int) -> int:
     return text.count("\n", 0, idx) + 1
 
 
+def _blank_code(src: str) -> str:
+    """Same-length copy of source with comment and string/char-literal *contents*
+    replaced by spaces, across the languages the textual pass targets (C-family
+    `//` and `/* */`, shell/Ruby/Python `#`, and ' " ` literals). This keeps real
+    code structure (loops, call names, kwarg keys) intact while ensuring a loop
+    keyword or the word "break" sitting in a comment or string can't create — or
+    suppress — a finding. Line numbers are preserved (newlines kept)."""
+    out = list(src)
+    i, n, st = 0, len(src), "code"
+    while i < n:
+        c = src[i]
+        nx = src[i + 1] if i + 1 < n else ""
+        if st == "code":
+            if c == "/" and nx == "/":
+                out[i] = out[i + 1] = " "; i += 2; st = "line"; continue
+            if c == "#":
+                out[i] = " "; i += 1; st = "line"; continue
+            if c == "/" and nx == "*":
+                out[i] = out[i + 1] = " "; i += 2; st = "block"; continue
+            if c in "'\"`":
+                st = {"'": "sq", '"': "dq", "`": "tk"}[c]; i += 1; continue
+            i += 1; continue
+        if st == "line":
+            if c == "\n":
+                st = "code"
+            else:
+                out[i] = " "
+            i += 1; continue
+        if st == "block":
+            if c == "*" and nx == "/":
+                out[i] = out[i + 1] = " "; i += 2; st = "code"; continue
+            if c != "\n":
+                out[i] = " "
+            i += 1; continue
+        q = {"sq": "'", "dq": '"', "tk": "`"}[st]
+        if c == "\\":
+            out[i] = " "
+            if i + 1 < n and src[i + 1] != "\n":
+                out[i + 1] = " "
+            i += 2; continue
+        if c == q:
+            st = "code"; i += 1; continue
+        if c != "\n":
+            out[i] = " "
+        i += 1
+    return "".join(out)
+
+
 def _textual_checks(source: str, path: str) -> List[Finding]:
+    # Scan over a comment/string-blanked copy so loop keywords or break/return in
+    # comments and string literals neither create nor suppress findings.
+    blanked = _blank_code(source)
     out: List[Finding] = []
-    out += _textual_unbounded_loops(source, path)
-    out += _textual_uncapped_output(source, path)
+    out += _textual_unbounded_loops(blanked, path)
+    out += _textual_uncapped_output(blanked, path)
     return out
 
 
@@ -256,7 +349,7 @@ def _textual_unbounded_loops(source: str, path: str) -> List[Finding]:
     out: List[Finding] = []
     for m in _INF_LOOP_RE.finditer(source):
         window = source[m.end(): m.end() + 1500]
-        if not _SDK_CALL_TEXT_RE.search(window):
+        if not _has_textual_sdk(window):
             continue
         if re.search(r'\b(break|return)\b', window):
             continue
@@ -276,15 +369,14 @@ def _textual_uncapped_output(source: str, path: str) -> List[Finding]:
     window. Heuristic (the window is bounded, not brace-matched)."""
     out: List[Finding] = []
     seen: Set[int] = set()
-    for m in _SDK_CALL_TEXT_RE.finditer(source):
-        args = source[m.end(): m.end() + 500]
+    for start, args_start, call in _textual_sdk_calls(source):
+        args = source[args_start: args_start + 500]
         if any(k in args for k in _OUTPUT_CAP_KWARGS):
             continue
-        ln = _line_at(source, m.start())
+        ln = _line_at(source, start)
         if ln in seen:
             continue
         seen.add(ln)
-        call = m.group(0).rstrip("( \t")
         out.append(Finding(
             finding_id="lint", category="uncapped_output",
             severity=_SEV["uncapped_output"],

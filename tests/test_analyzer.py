@@ -1315,5 +1315,80 @@ class TestJavaScriptGraph(unittest.TestCase):
         self.assertIn("recursive_loop", cats)
 
 
+class TestCrossLanguageLint(unittest.TestCase):
+    """Go / Java / Ruby agents aren't parsed into graphs, but the language-agnostic
+    textual lint must still catch the universal risks (unbounded loop around an LLM
+    call, uncapped output) instead of silently producing nothing."""
+
+    AGENTS = os.path.join(ROOT, "examples", "agents")
+
+    def _cats(self, path):
+        from tollgate.agentic_lint import lint_source
+        return {f.category for f in lint_source(path)}
+
+    def test_go_example_flags_loop_and_output(self):
+        cats = self._cats(os.path.join(self.AGENTS, "loop_agent.go"))
+        self.assertIn("unbounded_loop", cats)
+        self.assertIn("uncapped_output", cats)
+
+    def test_java_example_flags_loop_and_output(self):
+        cats = self._cats(os.path.join(self.AGENTS, "LoopAgent.java"))
+        self.assertIn("unbounded_loop", cats)
+        self.assertIn("uncapped_output", cats)
+
+    def test_ruby_example_flags_loop_and_output(self):
+        cats = self._cats(os.path.join(self.AGENTS, "loop_agent.rb"))
+        self.assertIn("unbounded_loop", cats)
+        self.assertIn("uncapped_output", cats)
+
+    def test_examples_block_via_pipeline(self):
+        """End to end: the three files surface as agentic-lint results that block."""
+        run = analyze_path([self.AGENTS, ], cfg=Config(trials=120))
+        kinds = {lr.source_path.split("/")[-1]: lr for lr in run.lint_results}
+        for name, ext in (("loop_agent.go", "go"), ("LoopAgent.java", "java"),
+                          ("loop_agent.rb", "rb")):
+            self.assertIn(name, kinds, f"{name} not linted")
+            self.assertEqual(kinds[name].source_kind, f"agentic-lint:{ext}")
+            self.assertEqual(kinds[name].gate_decision, "block")
+
+    def test_capped_bounded_go_is_quiet(self):
+        from tollgate.agentic_lint import lint_source
+        import tempfile
+        src = ("package main\n"
+               "func run(client *openai.Client) {\n"
+               "  for i := 0; i < 10; i++ {            // bounded\n"
+               "    resp, _ := client.CreateChatCompletion(ctx, openai.ChatCompletionRequest{\n"
+               "      Model: openai.GPT4o, MaxTokens: 500, Messages: msgs})\n"
+               "    _ = resp\n  }\n}\n")
+        with tempfile.TemporaryDirectory() as d:
+            p = os.path.join(d, "ok.go")
+            with open(p, "w") as fh:
+                fh.write(src)
+            cats = {f.category for f in lint_source(p)}
+            self.assertNotIn("unbounded_loop", cats)   # bounded for-loop
+            self.assertNotIn("uncapped_output", cats)  # MaxTokens set
+
+    def test_non_agentic_go_is_silent(self):
+        from tollgate.agentic_lint import lint_source
+        import tempfile
+        src = "package main\nfunc add(a, b int) int { for {} ; return a + b }\n"
+        with tempfile.TemporaryDirectory() as d:
+            p = os.path.join(d, "util.go")
+            with open(p, "w") as fh:
+                fh.write(src)
+            self.assertEqual(lint_source(p), [])       # infinite loop but no LLM call
+
+    def test_ruby_generic_chat_not_an_sdk_call(self):
+        """A non-LLM `.chat(` (no `parameters:`) must not be flagged."""
+        from tollgate.agentic_lint import lint_source
+        import tempfile
+        src = "loop do\n  ui.chat(message)\n  break if done\nend\n"
+        with tempfile.TemporaryDirectory() as d:
+            p = os.path.join(d, "ui.rb")
+            with open(p, "w") as fh:
+                fh.write(src)
+            self.assertEqual(lint_source(p), [])
+
+
 if __name__ == "__main__":
     unittest.main()
