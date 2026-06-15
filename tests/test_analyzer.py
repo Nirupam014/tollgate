@@ -1445,8 +1445,10 @@ class TestTreeSitterGraph(unittest.TestCase):
         self.assertEqual(res.risk.gate_decision, "block")
         self.assertTrue(any(f.category == "recursive_loop" for f in res.findings))
 
-    def test_bounded_go_is_honest_failure(self):
-        """A bounded for-loop isn't an unbounded cycle -> no graph -> falls to lint."""
+    def test_bounded_for_loop_is_costed_node_without_cycle(self):
+        """A bounded counted for-loop around an SDK call recovers a costed node
+        with NO cycle (parity with the Python imperative parser) — it's real calls
+        worth projecting, but not a recursive-loop risk."""
         from tollgate.parsers import parse_treesitter
         import tempfile
         src = ("package main\n"
@@ -1457,7 +1459,11 @@ class TestTreeSitterGraph(unittest.TestCase):
             p = os.path.join(d, "ok.go")
             with open(p, "w") as fh:
                 fh.write(src)
-            self.assertEqual(parse_treesitter(p).nodes, [])
+            wf = parse_treesitter(p)
+            self.assertEqual(len(wf.llm_nodes()), 1)
+            self.assertEqual([e for e in wf.edges if e.edge_type == "loop"], [])
+            res = analyze_workflow(wf, cfg=Config(trials=150))
+            self.assertFalse(any(f.category == "recursive_loop" for f in res.findings))
 
     def test_non_agentic_go_is_empty(self):
         from tollgate.parsers import parse_treesitter
