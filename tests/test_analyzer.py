@@ -1004,7 +1004,8 @@ class TestReportFormats(unittest.TestCase):
         # Fully self-contained: no external scripts / CDN (charts are inline HTML/CSS).
         self.assertNotIn("cdnjs", html)
         self.assertNotIn("<script src", html)
-        self.assertIn("hbars(", html)            # the dependency-free bar renderer
+        self.assertIn("hbars(", html)            # dependency-free horizontal bars
+        self.assertIn("svgGroupedBars(", html)   # dependency-free dual-axis SVG chart
 
         # The injected blob must be valid JSON and match the report payload.
         blob = html.split("const D = ", 1)[1].split(";\n", 1)[0]

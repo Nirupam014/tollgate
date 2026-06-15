@@ -714,15 +714,62 @@ function hbars(el, items, empty){
   }).join('');
 }
 
+// Dependency-free vertical grouped bar chart (inline SVG, no lib / CDN): two
+// series on dual axes — savings % (left, 0-100) and # nodes (right). Mirrors the
+// original right-sizing chart so both metrics are visible per substitution.
+function svgGroupedBars(el, groups, empty){
+  if(!el) return;
+  if(!groups.length){ el.innerHTML = '<div class="empty">'+esc(empty)+'</div>'; return; }
+  const W=560,H=300,L=40,R=40,T=12,B=92, pw=W-L-R, ph=H-T-B;
+  const n=groups.length, gw=pw/n, barW=Math.max(6, Math.min(24, gw*0.30));
+  const leftMax=100;
+  const rightMax=Math.max.apply(null, groups.map(g=>g.nodes).concat([1]));
+  const rTicks=Math.max(1, Math.min(5, rightMax));
+  const green='#0f9d6e', blue='#2563eb', baseY=T+ph;
+  let s='<svg viewBox="0 0 '+W+' '+H+'" width="100%" style="height:auto;max-height:300px" '+
+        'font-family="-apple-system,BlinkMacSystemFont,Segoe UI,Roboto,sans-serif">';
+  for(let t=0;t<=100;t+=20){
+    const y=baseY-(t/leftMax)*ph;
+    s+='<line x1="'+L+'" y1="'+y+'" x2="'+(L+pw)+'" y2="'+y+'" stroke="#e8edf4"/>'+
+       '<text x="'+(L-6)+'" y="'+(y+3)+'" font-size="9" fill="#8593a8" text-anchor="end">'+t+'</text>';
+  }
+  for(let i=0;i<=rTicks;i++){
+    const val=Math.round(rightMax*i/rTicks), y=baseY-(val/rightMax)*ph;
+    s+='<text x="'+(L+pw+6)+'" y="'+(y+3)+'" font-size="9" fill="#8593a8" text-anchor="start">'+val+'</text>';
+  }
+  s+='<text x="'+(L-26)+'" y="'+(T+ph/2)+'" font-size="9" fill="#8593a8" text-anchor="middle" '+
+     'transform="rotate(-90 '+(L-26)+' '+(T+ph/2)+')">savings %</text>'+
+     '<text x="'+(L+pw+30)+'" y="'+(T+ph/2)+'" font-size="9" fill="#8593a8" text-anchor="middle" '+
+     'transform="rotate(90 '+(L+pw+30)+' '+(T+ph/2)+')"># nodes</text>';
+  groups.forEach((g,i)=>{
+    const cx=L+gw*(i+0.5);
+    const sH=(g.savings/leftMax)*ph, nH=(g.nodes/rightMax)*ph;
+    s+='<rect x="'+(cx-barW-1)+'" y="'+(baseY-sH)+'" width="'+barW+'" height="'+sH+'" rx="2" fill="'+green+'">'+
+       '<title>'+esc(g.label)+': '+g.savings+'% savings</title></rect>'+
+       '<rect x="'+(cx+1)+'" y="'+(baseY-nH)+'" width="'+barW+'" height="'+nH+'" rx="2" fill="'+blue+'">'+
+       '<title>'+esc(g.label)+': '+g.nodes+' node(s)</title></rect>';
+    const ly=baseY+12, lab=g.label.length>28?g.label.slice(0,27)+'…':g.label;
+    s+='<text x="'+cx+'" y="'+ly+'" font-size="8.5" fill="#5d6b82" text-anchor="end" '+
+       'transform="rotate(-25 '+cx+' '+ly+')">'+esc(lab)+'</text>';
+  });
+  s+='<line x1="'+L+'" y1="'+baseY+'" x2="'+(L+pw)+'" y2="'+baseY+'" stroke="#cbd5e1"/>';
+  const lgY=H-12;
+  s+='<rect x="'+(L+pw/2-90)+'" y="'+(lgY-9)+'" width="10" height="10" rx="2" fill="'+green+'"/>'+
+     '<text x="'+(L+pw/2-75)+'" y="'+lgY+'" font-size="10" fill="#5d6b82">Avg savings %</text>'+
+     '<rect x="'+(L+pw/2+20)+'" y="'+(lgY-9)+'" width="10" height="10" rx="2" fill="'+blue+'"/>'+
+     '<text x="'+(L+pw/2+35)+'" y="'+lgY+'" font-size="10" fill="#5d6b82"># nodes</text>';
+  s+='</svg>';
+  el.innerHTML=s;
+}
+
 const mk = Object.keys(D.models);
 hbars(document.getElementById('modelBars'),
   mk.map(k=>({label:k, value:D.models[k], valLabel:D.models[k],
               suffix:' node'+(D.models[k]===1?'':'s')})),
   'No LLM nodes detected.');
 
-hbars(document.getElementById('recBars'),
-  D.swaps.map(s=>({label:s.from+' → '+s.to, value:s.avg_savings, valLabel:s.avg_savings,
-                   suffix:'% · '+s.count+'×'})),
+svgGroupedBars(document.getElementById('recBars'),
+  D.swaps.map(s=>({label:s.from+' → '+s.to, savings:s.avg_savings, nodes:s.count})),
   'No cheaper substitutions recommended.');
 if(D.swaps.length){
   const top = D.swaps[0];
