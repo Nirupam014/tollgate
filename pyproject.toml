@@ -41,7 +41,11 @@ Changelog = "https://github.com/nirupam014/tollgate/blob/main/CHANGELOG.md"
 # Optional: exact tokenization for OpenAI-family models. The analyzer works
 # without it using a deterministic heuristic tokenizer.
 tokenizers = ["tiktoken>=0.5"]
-dev = ["pytest>=7", "build>=1", "tiktoken>=0.5"]
+# Optional: real graph recovery for non-Python languages (Go, Java, Ruby, …) via
+# tree-sitter. The core stays stdlib-only; without this extra those languages get
+# the advisory textual lint instead of a recovered graph (honest failure).
+multilang = ["tree-sitter>=0.21", "tree-sitter-language-pack>=0.4"]
+dev = ["pytest>=7", "build>=1", "tiktoken>=0.5", "tree-sitter>=0.21", "tree-sitter-language-pack>=0.4"]
 
 [project.scripts]
 tollgate = "tollgate.cli:main"
