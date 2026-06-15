@@ -6,6 +6,20 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+- **Graph parity for Go, Java, and Ruby (optional `multilang` extra).** With
+  `pip install "tollgate[multilang]"` (tree-sitter), these languages are recovered
+  into the same Workflow IR as Python/JS and run through the same detectors
+  (Tarjan-SCC cycles, context, fan-out), prediction, and scoring — real graph
+  analysis, not just the textual lint. Recovered shapes: an unbounded loop around
+  an LLM SDK call in Go (`for {}`), Java (`while (true)`), and Ruby (`loop do` /
+  `while true`), plus the **LangGraph4j** builder in Java
+  (`StateGraph.addNode/.addEdge/.addConditionalEdges`). The core stays
+  stdlib-only: tree-sitter is imported lazily and, when the extra isn't installed,
+  these languages honest-fail to the advisory textual lint exactly as before — no
+  fabricated graphs. New `parsers/treesitter_multilang.py` + lazy
+  `parsers/treesitter_backend.py`; examples and backend-gated tests included.
+
 ### Fixed
 - **Cross-language lint now actually covers Go, Java, and Ruby.** The textual
   pass recognized only Python/JS-shaped SDK calls and loop forms, so idiomatic
