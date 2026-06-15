@@ -19,12 +19,26 @@ import unittest
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(ROOT, "src"))
-sys.path.insert(0, os.path.join(ROOT, "study"))
 
 # The field-study harness (study/) is internal tooling and is not shipped with
-# the published package. These tests exercise it, so they only run where study/
-# is present (the maintainer's full checkout); in the public repo they skip
-# cleanly instead of failing to import.
+# the published package — it lives in the private maintainer repo. These tests
+# exercise it, so we locate the harness wherever it is and add it to the path.
+# Resolution order:
+#   1. $TOLLGATE_STUDY_DIR              (explicit override; used by CI / Make)
+#   2. <repo>/study                     (monolithic checkout)
+#   3. <repo>/../tollgate-private/study (private repo checked out alongside)
+# In a pure public checkout none of these exist, so the tests skip cleanly
+# instead of failing to import.
+_STUDY_CANDIDATES = [
+    os.environ.get("TOLLGATE_STUDY_DIR"),
+    os.path.join(ROOT, "study"),
+    os.path.join(ROOT, os.pardir, "tollgate-private", "study"),
+]
+for _cand in _STUDY_CANDIDATES:
+    if _cand and os.path.isdir(_cand):
+        sys.path.insert(0, os.path.abspath(_cand))
+        break
+
 try:
     import feedback as fb        # noqa: E402
     import report as rpt         # noqa: E402
