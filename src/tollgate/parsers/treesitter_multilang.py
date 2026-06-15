@@ -90,6 +90,14 @@ def _col(node) -> int:
     return node.start_point[1]
 
 
+def _nid(node):
+    """Stable identity for a tree-sitter node. The bindings return a *new* Python
+    wrapper object on every `.parent`/`.children` access, so Python `id()` is NOT
+    stable for the same underlying node — `node.id` is."""
+    v = getattr(node, "id", None)
+    return v if v is not None else id(node)
+
+
 def _ancestors(node):
     p = node.parent
     while p is not None:
@@ -148,34 +156,34 @@ def parse_treesitter(path: str) -> Workflow:
 # --- generic imperative recovery (port of parsers/imperative.py) --------------
 def _recover_imperative(root, ad: "LangAdapter", file_model):
     funcs = ad.functions(root)
-    fid_name = {id(fn): ad.func_name(fn) for fn in funcs}
-    local = {id(fn): _local_scan(fn, ad) for fn in funcs}   # (has_sdk, called:set, model)
+    fid_name = {_nid(fn): ad.func_name(fn) for fn in funcs}
+    local = {_nid(fn): _local_scan(fn, ad) for fn in funcs}   # (has_sdk, called:set, model)
 
     is_llm = {}
     for fn in funcs:
-        n = fid_name[id(fn)]
-        is_llm[n] = is_llm.get(n, False) or local[id(fn)][0]
+        n = fid_name[_nid(fn)]
+        is_llm[n] = is_llm.get(n, False) or local[_nid(fn)][0]
     changed = True
     while changed:
         changed = False
         for fn in funcs:
-            n = fid_name[id(fn)]
-            if not is_llm.get(n) and any(is_llm.get(c) for c in local[id(fn)][1]):
+            n = fid_name[_nid(fn)]
+            if not is_llm.get(n) and any(is_llm.get(c) for c in local[_nid(fn)][1]):
                 is_llm[n] = True
                 changed = True
     llm_names = {n for n, v in is_llm.items() if v}
-    func_model = {fid_name[id(fn)]: local[id(fn)][2] for fn in funcs}
+    func_model = {fid_name[_nid(fn)]: local[_nid(fn)][2] for fn in funcs}
 
     called_by_llm = set()
     for fn in funcs:
-        if is_llm.get(fid_name[id(fn)]):
-            called_by_llm |= {c for c in local[id(fn)][1] if c != fid_name[id(fn)]}
+        if is_llm.get(fid_name[_nid(fn)]):
+            called_by_llm |= {c for c in local[_nid(fn)][1] if c != fid_name[_nid(fn)]}
     entry_llm = {n for n in llm_names if n not in called_by_llm}
-    has_loop = {fid_name[id(fn)] for fn in funcs
-                if fid_name[id(fn)] in llm_names and _body_has_loop(fn, ad)}
+    has_loop = {fid_name[_nid(fn)] for fn in funcs
+                if fid_name[_nid(fn)] in llm_names and _body_has_loop(fn, ad)}
     driver_names = entry_llm | has_loop
-    wrapper_ids = {id(fn) for fn in funcs
-                   if fid_name[id(fn)] in llm_names and fid_name[id(fn)] not in driver_names}
+    wrapper_ids = {_nid(fn) for fn in funcs
+                   if fid_name[_nid(fn)] in llm_names and fid_name[_nid(fn)] not in driver_names}
 
     # trigger sites
     sites: List[Dict] = []
@@ -200,7 +208,7 @@ def _recover_imperative(root, ad: "LangAdapter", file_model):
     sites.sort(key=lambda s: (s["line"], s["col"]))
     groups: "OrderedDict" = OrderedDict()
     for s in sites:
-        key = id(s["outer"]) if s["outer"] is not None else None
+        key = _nid(s["outer"]) if s["outer"] is not None else None
         groups.setdefault(key, {"loop": s["outer"], "sites": []})["sites"].append(s)
 
     used: set = set()
@@ -291,7 +299,7 @@ def _enclosing_loops(node, ad: "LangAdapter"):
 
 
 def _inside_ids(node, ids) -> bool:
-    return any(id(a) in ids for a in _ancestors(node))
+    return any(_nid(a) in ids for a in _ancestors(node))
 
 
 # --- language adapters --------------------------------------------------------
