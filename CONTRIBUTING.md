@@ -29,6 +29,10 @@ For larger changes, also run the full validation suite:
 bash validation/run_all.sh                  # metamorphic, fuzz, mutation, determinism
 ```
 
+Every test here runs against the shipped package with no external setup — there
+are no skipped tests. (The internal field-study harness and its tests live in the
+maintainer's private repo, not in this package.)
+
 ## Ground rules
 
 - **Stay deterministic.** No LLM calls, no network, no nondeterminism in analysis

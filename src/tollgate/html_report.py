@@ -5,8 +5,11 @@ so the dashboard is produced in the same ``tollgate analyze`` run as the json /
 markdown / sarif reports. The data is derived from ``run.to_dict()`` — the same
 payload the json reporter emits — so the dashboard never drifts from the report.
 
-The output is a single file with no build step: charts use Chart.js from a CDN,
-and the analysis payload is inlined as a JSON blob the page reads on load.
+The output is a single, fully self-contained file with no build step and **no
+external resources**: the analysis payload is inlined as a JSON blob the page
+reads on load, and the bar charts are rendered with plain inline HTML/CSS (no
+charting library, no CDN), so the report renders identically offline, in a
+sandboxed file preview, and in any CI artifact viewer.
 
 Because this runs *inside* ``tollgate analyze`` (before any scan-script cleanup),
 the scanned source files still exist on disk, so we resolve exact line numbers for
@@ -323,6 +326,7 @@ def build_dashboard_data(run: RunResult) -> Dict[str, Any]:
         "prompt_reviews": prompt_rows,
         "prompt_tokens_saved": prompt_tokens_saved,
         "detected_prompts": d.get("detected_prompts", []),
+        "baseline_diff": d.get("baseline_diff"),
     }
 
 
@@ -420,7 +424,25 @@ BASE_CSS = r"""
     background:var(--accent);color:#fff;font-size:10px;font-weight:700;font-style:normal;
     display:flex;align-items:center;justify-content:center;font-family:Georgia,serif}
   .note b{color:var(--text);font-weight:600}
-  .barwrap{height:230px}
+  /* ---- PR-delta banner ---- */
+  .delta{border:1px solid var(--line);border-radius:16px;padding:16px 18px;margin-bottom:22px;
+    box-shadow:var(--shadow);background:var(--panel)}
+  .delta.block{border-left:5px solid var(--bad);background:var(--bad-soft)}
+  .delta.warn{border-left:5px solid var(--warn);background:#fdf4e7}
+  .delta.pass{border-left:5px solid var(--good);background:var(--good-soft)}
+  .delta .dh{display:flex;align-items:center;gap:10px;flex-wrap:wrap;font-weight:700;font-size:15px}
+  .delta .counts{display:flex;gap:8px;margin:12px 0 4px;flex-wrap:wrap}
+  .delta .ct{padding:4px 11px;border-radius:20px;font-size:12px;font-weight:600;border:1px solid var(--line);background:#fff}
+  .delta .ct.n{color:#b42318} .delta .ct.w{color:#b45309} .delta .ct.f{color:#067a55} .delta .ct.u{color:var(--muted)}
+  .delta table{margin-top:10px;background:#fff;border-radius:10px;overflow:hidden}
+  .delta .sub{color:var(--muted);font-size:12px;margin-top:6px}
+  .barwrap{min-height:120px;display:flex;flex-direction:column;justify-content:center}
+  /* dependency-free horizontal bars (replaces the old canvas charts) */
+  .hbar{display:grid;grid-template-columns:130px 1fr 96px;align-items:center;gap:10px;margin:7px 0;font-size:12px}
+  .hbar-l{color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .hbar-t{background:var(--line2);border-radius:6px;height:16px;overflow:hidden}
+  .hbar-f{height:100%;border-radius:6px;min-width:2px;transition:width .2s}
+  .hbar-v{text-align:right;font-weight:600;color:var(--text);white-space:nowrap}
   .empty{color:var(--faint);font-size:13px;padding:22px 6px;text-align:center}
   .caret{display:inline-block;width:12px;color:var(--faint);transition:transform .15s}
   tr.open .caret{transform:rotate(90deg);color:var(--accent)}
@@ -474,7 +496,6 @@ _TEMPLATE = r"""<!DOCTYPE html>
 <meta charset="utf-8"/>
 <meta name="viewport" content="width=device-width, initial-scale=1"/>
 <title>Tollgate Scan Report</title>
-<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
 <style>
 __BASE_CSS__
 </style>
@@ -492,16 +513,18 @@ __BASE_CSS__
     <div id="gateBadge"></div>
   </header>
 
+  <div id="deltaBanner"></div>
+
   <div class="kpis" id="kpis"></div>
 
   <div class="grid">
     <div class="card">
       <h2>Model mix <span class="badge" id="modelCount"></span></h2>
-      <div class="barwrap"><canvas id="modelChart"></canvas></div>
+      <div class="barwrap" id="modelBars"></div>
     </div>
     <div class="card">
       <h2>Model right-sizing (cost lever) <span class="badge" id="recCount"></span></h2>
-      <div class="barwrap"><canvas id="recChart"></canvas></div>
+      <div class="barwrap" id="recBars"></div>
       <div class="note" id="recNote"></div>
     </div>
   </div>
@@ -572,6 +595,41 @@ if (D.fingerprint) { const _fp=document.getElementById('fpLine'); if(_fp) _fp.in
   }).join('');
   document.getElementById('dpCount').textContent = dp.length + ' · ~' + tot.toLocaleString() + ' tokens';
 })();
+// --- PR-delta banner (only when run against a baseline) ----------------------
+(function(){
+  const bd = D.baseline_diff;
+  if (!bd) return;
+  const el = document.getElementById('deltaBanner');
+  const g = bd.delta_gate || 'pass';
+  const c = bd.counts || {};
+  const dloc = f => {
+    const p = (f.source_path||'').split('/').pop();
+    const sfx = f.line ? (':'+f.line) : (f.node_id ? (' @'+f.node_id) : '');
+    return p ? (p+sfx) : (sfx||'—');
+  };
+  const newRows = (bd.new||[]).slice(0,20).map(f=>{
+    const occ = (f.occurrences && f.occurrences>1) ? (' ×'+f.occurrences) : '';
+    return '<tr><td><span class="sev '+esc(f.severity)+'">'+esc(f.severity)+occ+'</span></td>'+
+      '<td><span class="tag">'+esc(f.category)+'</span></td><td class="loc">'+esc(dloc(f))+
+      '</td><td>'+esc(f.message)+'</td></tr>';
+  }).join('');
+  const worRows = (bd.worsened||[]).slice(0,20).map(f=>
+    '<tr><td>'+esc(f.from_severity)+' → <b>'+esc(f.to_severity)+'</b></td>'+
+    '<td><span class="tag">'+esc(f.category)+'</span></td><td class="loc">'+esc(dloc(f))+
+    '</td><td>'+esc(f.message)+'</td></tr>').join('');
+  let html = '<div class="delta '+g+'">'+
+    '<div class="dh"><span class="dot"></span>Tollgate PR check: '+g.toUpperCase()+
+    '<span class="sub" style="margin-left:auto">gates on the change only — pre-existing issues never fail this check</span></div>'+
+    '<div class="counts"><span class="ct n">'+(c.new||0)+' new</span>'+
+    '<span class="ct w">'+(c.worsened||0)+' worsened</span>'+
+    '<span class="ct f">'+(c.fixed||0)+' fixed</span>'+
+    '<span class="ct u">'+(c.unchanged||0)+' unchanged</span></div>';
+  if (newRows) html += '<table><thead><tr><th>Severity</th><th>Type</th><th>Location</th><th>New finding</th></tr></thead><tbody>'+newRows+'</tbody></table>';
+  if (worRows) html += '<table><thead><tr><th>Change</th><th>Type</th><th>Location</th><th>Worsened finding</th></tr></thead><tbody>'+worRows+'</tbody></table>';
+  html += '<div class="sub">Repo-wide gate (for context): <b>'+esc((bd.full_gate||'').toUpperCase())+'</b>. '+
+    'Baseline '+esc((bd.baseline_fingerprint||'').slice(0,12))+'…</div></div>';
+  el.innerHTML = html;
+})();
 const fmtBig = n => { n=Number(n||0); return n>=1e9?(n/1e9).toFixed(1)+'B':n>=1e6?(n/1e6).toFixed(1)+'M':n>=1e3?(n/1e3).toFixed(1)+'K':(''+Math.round(n)); };
 const loc = (f,l) => f ? (esc(f)+(l?(':'+l):'')) : '—';
 
@@ -639,38 +697,88 @@ document.getElementById('findCount').textContent = D.total_findings + ' total';
 document.getElementById('wfCount').textContent = D.workflows + ' total';
 
 const PALETTE = ['#2563eb','#0f9d6e','#d97706','#dc2626','#7c3aed','#0891b2','#ea580c','#db2777','#64748b','#16a34a'];
-Chart.defaults.color = '#5d6b82';
-Chart.defaults.font.family = "-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif";
 
-const mk = Object.keys(D.models), mv = mk.map(k=>D.models[k]);
-if(mk.length){
-  new Chart(document.getElementById('modelChart'), {
-    type:'bar',
-    data:{labels:mk, datasets:[{data:mv, backgroundColor:mk.map((_,i)=>PALETTE[i%PALETTE.length]), borderRadius:6, maxBarThickness:34}]},
-    options:{indexAxis:'y', plugins:{legend:{display:false}, tooltip:{callbacks:{label:c=>c.parsed.x+' node(s)'}}},
-      scales:{x:{grid:{color:'#e8edf4'},ticks:{precision:0}}, y:{grid:{display:false}}}}
+// Dependency-free horizontal bar chart (no charting lib / CDN). items:
+//   {label, value, valLabel?, suffix?}  — bar length is value / max.
+function hbars(el, items, empty){
+  if(!el) return;
+  if(!items.length){ el.innerHTML = '<div class="empty">'+esc(empty)+'</div>'; return; }
+  const max = Math.max.apply(null, items.map(i=>i.value).concat([1]));
+  el.innerHTML = items.map((it,idx)=>{
+    const w = Math.max(2, Math.round((it.value/max)*100));
+    const color = PALETTE[idx % PALETTE.length];
+    const v = (it.valLabel!=null ? it.valLabel : it.value);
+    return '<div class="hbar"><div class="hbar-l" title="'+esc(it.label)+'">'+esc(it.label)+'</div>'+
+      '<div class="hbar-t"><div class="hbar-f" style="width:'+w+'%;background:'+color+'"></div></div>'+
+      '<div class="hbar-v">'+esc(v)+esc(it.suffix||'')+'</div></div>';
+  }).join('');
+}
+
+// Dependency-free vertical grouped bar chart (inline SVG, no lib / CDN): two
+// series on dual axes — savings % (left, 0-100) and # nodes (right). Mirrors the
+// original right-sizing chart so both metrics are visible per substitution.
+function svgGroupedBars(el, groups, empty){
+  if(!el) return;
+  if(!groups.length){ el.innerHTML = '<div class="empty">'+esc(empty)+'</div>'; return; }
+  const W=560,H=300,L=40,R=40,T=12,B=92, pw=W-L-R, ph=H-T-B;
+  const n=groups.length, gw=pw/n, barW=Math.max(6, Math.min(24, gw*0.30));
+  const leftMax=100;
+  const rightMax=Math.max.apply(null, groups.map(g=>g.nodes).concat([1]));
+  const rTicks=Math.max(1, Math.min(5, rightMax));
+  const green='#0f9d6e', blue='#2563eb', baseY=T+ph;
+  let s='<svg viewBox="0 0 '+W+' '+H+'" width="100%" style="height:auto;max-height:300px" '+
+        'font-family="-apple-system,BlinkMacSystemFont,Segoe UI,Roboto,sans-serif">';
+  for(let t=0;t<=100;t+=20){
+    const y=baseY-(t/leftMax)*ph;
+    s+='<line x1="'+L+'" y1="'+y+'" x2="'+(L+pw)+'" y2="'+y+'" stroke="#e8edf4"/>'+
+       '<text x="'+(L-6)+'" y="'+(y+3)+'" font-size="9" fill="#8593a8" text-anchor="end">'+t+'</text>';
+  }
+  for(let i=0;i<=rTicks;i++){
+    const val=Math.round(rightMax*i/rTicks), y=baseY-(val/rightMax)*ph;
+    s+='<text x="'+(L+pw+6)+'" y="'+(y+3)+'" font-size="9" fill="#8593a8" text-anchor="start">'+val+'</text>';
+  }
+  s+='<text x="'+(L-26)+'" y="'+(T+ph/2)+'" font-size="9" fill="#8593a8" text-anchor="middle" '+
+     'transform="rotate(-90 '+(L-26)+' '+(T+ph/2)+')">savings %</text>'+
+     '<text x="'+(L+pw+30)+'" y="'+(T+ph/2)+'" font-size="9" fill="#8593a8" text-anchor="middle" '+
+     'transform="rotate(90 '+(L+pw+30)+' '+(T+ph/2)+')"># nodes</text>';
+  groups.forEach((g,i)=>{
+    const cx=L+gw*(i+0.5);
+    const sH=(g.savings/leftMax)*ph, nH=(g.nodes/rightMax)*ph;
+    s+='<rect x="'+(cx-barW-1)+'" y="'+(baseY-sH)+'" width="'+barW+'" height="'+sH+'" rx="2" fill="'+green+'">'+
+       '<title>'+esc(g.label)+': '+g.savings+'% savings</title></rect>'+
+       '<rect x="'+(cx+1)+'" y="'+(baseY-nH)+'" width="'+barW+'" height="'+nH+'" rx="2" fill="'+blue+'">'+
+       '<title>'+esc(g.label)+': '+g.nodes+' node(s)</title></rect>';
+    const ly=baseY+12, lab=g.label.length>28?g.label.slice(0,27)+'…':g.label;
+    s+='<text x="'+cx+'" y="'+ly+'" font-size="8.5" fill="#5d6b82" text-anchor="end" '+
+       'transform="rotate(-25 '+cx+' '+ly+')">'+esc(lab)+'</text>';
   });
-} else { document.getElementById('modelChart').parentElement.innerHTML = '<div class="empty">No LLM nodes detected.</div>'; }
+  s+='<line x1="'+L+'" y1="'+baseY+'" x2="'+(L+pw)+'" y2="'+baseY+'" stroke="#cbd5e1"/>';
+  const lgY=H-12;
+  s+='<rect x="'+(L+pw/2-90)+'" y="'+(lgY-9)+'" width="10" height="10" rx="2" fill="'+green+'"/>'+
+     '<text x="'+(L+pw/2-75)+'" y="'+lgY+'" font-size="10" fill="#5d6b82">Avg savings %</text>'+
+     '<rect x="'+(L+pw/2+20)+'" y="'+(lgY-9)+'" width="10" height="10" rx="2" fill="'+blue+'"/>'+
+     '<text x="'+(L+pw/2+35)+'" y="'+lgY+'" font-size="10" fill="#5d6b82"># nodes</text>';
+  s+='</svg>';
+  el.innerHTML=s;
+}
 
+const mk = Object.keys(D.models);
+hbars(document.getElementById('modelBars'),
+  mk.map(k=>({label:k, value:D.models[k], valLabel:D.models[k],
+              suffix:' node'+(D.models[k]===1?'':'s')})),
+  'No LLM nodes detected.');
+
+svgGroupedBars(document.getElementById('recBars'),
+  D.swaps.map(s=>({label:s.from+' → '+s.to, savings:s.avg_savings, nodes:s.count})),
+  'No cheaper substitutions recommended.');
 if(D.swaps.length){
-  const rl = D.swaps.map(s=>s.from+' → '+s.to);
-  new Chart(document.getElementById('recChart'), {
-    type:'bar',
-    data:{labels:rl, datasets:[
-      {label:'Avg savings %', data:D.swaps.map(s=>s.avg_savings), backgroundColor:'#0f9d6e', borderRadius:6, yAxisID:'y', maxBarThickness:30},
-      {label:'# nodes', data:D.swaps.map(s=>s.count), backgroundColor:'#2563eb', borderRadius:6, yAxisID:'y1', maxBarThickness:30}
-    ]},
-    options:{plugins:{legend:{position:'bottom',labels:{boxWidth:12,padding:14}},
-        tooltip:{callbacks:{label:c=>c.dataset.label+': '+c.parsed.y+(c.datasetIndex===0?'%':'')}}},
-      scales:{x:{grid:{display:false},ticks:{font:{size:10}}},
-        y:{position:'left',grid:{color:'#e8edf4'},title:{display:true,text:'savings %'},max:100},
-        y1:{position:'right',grid:{display:false},title:{display:true,text:'# nodes'},ticks:{precision:0}}}}
-  });
   const top = D.swaps[0];
   document.getElementById('recNote').innerHTML =
     'Largest lever: <b>'+esc(top.count)+'× '+esc(top.from)+' → '+esc(top.to)+
     '</b> at ~'+top.avg_savings+'% token-cost reduction per call. See the detail table below for exact code paths.';
-} else { document.getElementById('recChart').parentElement.innerHTML = '<div class="empty">No cheaper substitutions recommended.</div>'; }
+} else {
+  document.getElementById('recNote').innerHTML = '';
+}
 
 // --- Findings: expandable rows with exact file:line + remediation (#4) ---------
 const fb = document.querySelector('#findTable tbody');

@@ -719,6 +719,35 @@ class TestAgenticLint(unittest.TestCase):
         run = self._run(body)
         self.assertIn("missing_iteration_cap", self._lint_cats(run))
 
+    def test_language_agnostic_lint_non_python(self):
+        # The textual lint must catch infinite-loop-around-an-LLM-call and uncapped
+        # output in non-Python source, and stay quiet on safe / non-agentic code.
+        from tollgate.agentic_lint import lint_source
+        import tempfile
+        d = tempfile.mkdtemp()
+        def w(name, src):
+            p = os.path.join(d, name)
+            with open(p, "w") as fh:
+                fh.write(src)
+            return p
+        js_loop = w("agent.js",
+            'import {OpenAI} from "openai";\nasync function run(m){\n'
+            '  while (true) {\n    await client.chat.completions.create({model:"gpt-4o", messages:m});\n  }\n}')
+        go_loop = w("agent.go",
+            'package main\nimport "openai"\nfunc run(){\n  for {\n'
+            '    _ = openai.chat.completions.create(req)\n  }\n}')
+        ts_uncapped = w("u.ts",
+            'import {OpenAI} from "openai";\nconst r = await client.chat.completions.create({model:"gpt-4o", messages});')
+        ts_capped = w("c.ts",
+            'import {OpenAI} from "openai";\nfor (const x of items){ await client.chat.completions.create({model, messages:x, max_tokens:256}); }')
+        plain = w("p.go", "package main\nfunc main(){ for { work(); if c { break } } }")
+
+        self.assertIn("unbounded_loop", {f.category for f in lint_source(js_loop)})
+        self.assertIn("unbounded_loop", {f.category for f in lint_source(go_loop)})
+        self.assertIn("uncapped_output", {f.category for f in lint_source(ts_uncapped)})
+        self.assertEqual(lint_source(ts_capped), [])      # bounded + capped -> clean
+        self.assertEqual(lint_source(plain), [])          # not agentic -> silent
+
     def test_strictness_off_disables_lint(self):
         body = ("from langchain.agents import AgentExecutor\n"
                 "ex = AgentExecutor(agent=a, tools=t)\n")
@@ -971,8 +1000,12 @@ class TestReportFormats(unittest.TestCase):
         html = report.to_html(run)
         # Self-contained, single-file dashboard with the data inlined.
         self.assertIn("<!DOCTYPE html>", html)
-        self.assertIn("Chart.js", html)
         self.assertNotIn("__TOLLGATE_DATA__", html)  # placeholder must be substituted
+        # Fully self-contained: no external scripts / CDN (charts are inline HTML/CSS).
+        self.assertNotIn("cdnjs", html)
+        self.assertNotIn("<script src", html)
+        self.assertIn("hbars(", html)            # dependency-free horizontal bars
+        self.assertIn("svgGroupedBars(", html)   # dependency-free dual-axis SVG chart
 
         # The injected blob must be valid JSON and match the report payload.
         blob = html.split("const D = ", 1)[1].split(";\n", 1)[0]
@@ -989,6 +1022,519 @@ class TestReportFormats(unittest.TestCase):
             data["total_recs"], sum(len(r.recommendations) for r in run.results))
         for row in data["rows"]:
             self.assertIn(row["gate"], ("pass", "warn", "block"))
+
+
+class TestBaselineDiff(unittest.TestCase):
+    """PR-delta gating: diff a fresh report against a baseline and gate only on
+    new/worsened findings."""
+
+    def _report(self, findings, *, gate="warn", lint=None, fp="fp0"):
+        """Build a minimal report dict in the RunResult.to_dict() shape."""
+        return {
+            "gate_decision": gate,
+            "fingerprint": fp,
+            "results": [{"source_path": "/repo/agent.py",
+                         "findings": list(findings),
+                         "policy_violations": []}],
+            "lint_results": list(lint or []),
+        }
+
+    def _f(self, category, severity, message, node_id=None, source_path="/repo/agent.py",
+           line=None):
+        return {"finding_id": f"{category}-x", "category": category, "severity": severity,
+                "message": message, "node_id": node_id, "source_path": source_path,
+                "line": line, "evidence": {}}
+
+    def test_brand_new_finding_is_flagged_and_blocks(self):
+        from tollgate.baseline import diff_reports
+        base = self._report([self._f("uncapped_output", "medium", "no cap on call A")])
+        cur = self._report([
+            self._f("uncapped_output", "medium", "no cap on call A"),
+            self._f("recursive_loop", "critical", "Cycle x has no guard", node_id="x"),
+        ])
+        diff = diff_reports(cur, base)
+        self.assertEqual(diff["delta_gate"], "block")           # new critical
+        self.assertEqual(diff["counts"]["new"], 1)
+        self.assertEqual(diff["counts"]["unchanged"], 1)
+        self.assertEqual(diff["new"][0]["category"], "recursive_loop")
+
+    def test_preexisting_only_passes(self):
+        """The whole point: a risky repo with no NEW issues must not fail the PR."""
+        from tollgate.baseline import diff_reports
+        findings = [self._f("recursive_loop", "critical", "Cycle x has no guard", node_id="x")]
+        base = self._report(findings, gate="block")
+        cur = self._report(findings, gate="block")
+        diff = diff_reports(cur, base)
+        self.assertEqual(diff["delta_gate"], "pass")
+        self.assertEqual(diff["counts"]["new"], 0)
+        self.assertEqual(diff["counts"]["unchanged"], 1)
+
+    def test_count_increase_counts_as_new(self):
+        """A second occurrence that normalizes to the same identity is still new."""
+        from tollgate.baseline import diff_reports
+        f = self._f("uncapped_output", "medium", "LLM call has no max_tokens cap")
+        base = self._report([f])
+        cur = self._report([dict(f), dict(f)])   # two identical-identity findings
+        diff = diff_reports(cur, base)
+        self.assertEqual(diff["counts"]["new"], 1)
+        self.assertEqual(diff["new"][0]["occurrences"], 1)
+
+    def test_severity_worsening_is_flagged(self):
+        from tollgate.baseline import diff_reports
+        base = self._report([self._f("prompt_bloat", "low", "prompt is large", node_id="p")])
+        cur = self._report([self._f("prompt_bloat", "high", "prompt is large", node_id="p")])
+        diff = diff_reports(cur, base)
+        self.assertEqual(diff["counts"]["worsened"], 1)
+        self.assertEqual(diff["worsened"][0]["from_severity"], "low")
+        self.assertEqual(diff["worsened"][0]["to_severity"], "high")
+
+    def test_fixed_finding_reported_not_gated(self):
+        from tollgate.baseline import diff_reports
+        base = self._report([self._f("uncapped_output", "medium", "no cap on call A")])
+        cur = self._report([])
+        diff = diff_reports(cur, base)
+        self.assertEqual(diff["counts"]["fixed"], 1)
+        self.assertEqual(diff["counts"]["new"], 0)
+        self.assertEqual(diff["delta_gate"], "pass")
+
+    def test_identity_is_line_insensitive(self):
+        """An unrelated edit that shifts a finding's line must not make it 'new'."""
+        from tollgate.baseline import diff_reports
+        base = self._report([self._f("uncapped_output", "medium", "no cap", line=10)])
+        cur = self._report([self._f("uncapped_output", "medium", "no cap", line=42)])
+        diff = diff_reports(cur, base)
+        self.assertEqual(diff["counts"]["new"], 0)
+        self.assertEqual(diff["counts"]["unchanged"], 1)
+
+    def test_identity_normalizes_digits_in_message(self):
+        """A changed token-count inside the message must not fork one issue."""
+        from tollgate.baseline import diff_reports
+        base = self._report([self._f("prompt_bloat", "medium", "prompt is 1200 tokens", node_id="p")])
+        cur = self._report([self._f("prompt_bloat", "medium", "prompt is 1530 tokens", node_id="p")])
+        diff = diff_reports(cur, base)
+        self.assertEqual(diff["counts"]["new"], 0)
+        self.assertEqual(diff["counts"]["unchanged"], 1)
+
+    def test_empty_baseline_treats_all_as_new(self):
+        from tollgate.baseline import diff_reports
+        cur = self._report([self._f("recursive_loop", "critical", "Cycle x", node_id="x")])
+        diff = diff_reports(cur, {})        # no 'results' key -> empty baseline
+        self.assertEqual(diff["counts"]["new"], 1)
+        self.assertEqual(diff["delta_gate"], "block")
+
+    def test_lint_results_are_included(self):
+        from tollgate.baseline import diff_reports
+        lr = [{"source_path": "/repo/agent.js",
+               "findings": [self._f("unbounded_loop", "critical", "while(true) wraps a call",
+                                    source_path="/repo/agent.js")]}]
+        base = self._report([])
+        cur = self._report([], lint=lr)
+        diff = diff_reports(cur, base)
+        self.assertEqual(diff["counts"]["new"], 1)
+        self.assertEqual(diff["delta_gate"], "block")
+
+
+class TestBaselineEndToEnd(unittest.TestCase):
+    """Through the real pipeline: produce a baseline report, mutate the source,
+    and confirm the delta gate / exit code behave correctly."""
+
+    def _write(self, d, body):
+        p = os.path.join(d, "agent.py")
+        with open(p, "w", encoding="utf-8") as fh:
+            fh.write(body)
+        return p
+
+    _CAPPED = ("import openai\n"
+               "def s(t):\n"
+               "    return openai.chat.completions.create(model='gpt-4o', max_tokens=500,"
+               " messages=[{'role':'user','content':t}])\n")
+    _ONE_UNCAPPED = ("import openai\n"
+                     "def s(t):\n"
+                     "    return openai.chat.completions.create(model='gpt-4o',"
+                     " messages=[{'role':'user','content':t}])\n")
+    _REGRESSION = _ONE_UNCAPPED + (
+        "def loop(t):\n"
+        "    while True:\n"
+        "        r = openai.chat.completions.create(model='gpt-4o',"
+        " messages=[{'role':'user','content':t}])\n"
+        "        t = r.choices[0].message.content\n")
+
+    def _run(self, d):
+        return analyze_path([d], cfg=Config(trials=200))
+
+    def test_no_change_passes_even_on_risky_repo(self):
+        import tempfile
+        from tollgate.pipeline import apply_baseline
+        with tempfile.TemporaryDirectory() as d:
+            self._write(d, self._REGRESSION)
+            baseline = self._run(d).to_dict()
+            run = self._run(d)
+            apply_baseline(run, baseline, Config())
+            self.assertEqual(run.gate_decision, "block")        # repo is risky
+            self.assertEqual(run.effective_gate, "pass")        # but nothing new
+            self.assertEqual(run.baseline_diff["counts"]["new"], 0)
+
+    def test_regression_blocks_via_effective_gate(self):
+        import tempfile
+        from tollgate.pipeline import apply_baseline
+        with tempfile.TemporaryDirectory() as d:
+            self._write(d, self._ONE_UNCAPPED)
+            baseline = self._run(d).to_dict()
+            self._write(d, self._REGRESSION)                    # add loop + 2nd call
+            run = self._run(d)
+            apply_baseline(run, baseline, Config())
+            self.assertEqual(run.effective_gate, "block")
+            self.assertGreaterEqual(run.baseline_diff["counts"]["new"], 1)
+
+    def test_fix_shows_as_fixed_and_passes(self):
+        import tempfile
+        from tollgate.pipeline import apply_baseline
+        with tempfile.TemporaryDirectory() as d:
+            self._write(d, self._ONE_UNCAPPED)
+            baseline = self._run(d).to_dict()
+            self._write(d, self._CAPPED)                        # add the cap
+            run = self._run(d)
+            apply_baseline(run, baseline, Config())
+            self.assertEqual(run.effective_gate, "pass")
+            self.assertEqual(run.baseline_diff["counts"]["fixed"], 1)
+
+    def test_to_dict_and_reporters_carry_delta(self):
+        import tempfile
+        from tollgate import report
+        from tollgate.pipeline import apply_baseline
+        with tempfile.TemporaryDirectory() as d:
+            self._write(d, self._ONE_UNCAPPED)
+            baseline = self._run(d).to_dict()
+            self._write(d, self._REGRESSION)
+            run = self._run(d)
+            apply_baseline(run, baseline, Config())
+            self.assertIn("baseline_diff", run.to_dict())
+            self.assertIn("Tollgate PR check", report.to_markdown(run))
+            self.assertIn("Tollgate PR check", report.to_terminal(run))
+            self.assertIn("Tollgate PR check", report.to_html(run))
+
+
+class TestJavaScriptGraph(unittest.TestCase):
+    """Multi-language graph recovery: JS/TS LangGraph.js graphs and imperative
+    loop-around-LLM-call agents are parsed into the same IR and run through the
+    same detectors/prediction/scoring as Python."""
+
+    AGENTS = os.path.join(ROOT, "examples", "agents")
+
+    def _wf(self, name):
+        return parse_file(os.path.join(self.AGENTS, name))
+
+    def test_langgraph_js_cycle_recovered_and_blocks(self):
+        wf = self._wf("langgraph_react.js")
+        self.assertEqual(wf.source_kind, "langgraph-js")
+        self.assertEqual(set(wf.node_ids), {"agent", "tools"})
+        self.assertEqual(wf.nodes[0].intended_model, "gpt-4o")   # model recovered
+        self.assertTrue(any(e.edge_type == "loop" for e in wf.edges))
+        res = analyze_workflow(wf, cfg=Config(trials=200))
+        self.assertEqual(res.risk.gate_decision, "block")
+        self.assertTrue(any(f.category == "recursive_loop" for f in res.findings))
+
+    def test_langgraph_ts_linear_passes(self):
+        wf = self._wf("langgraph_pipeline.ts")
+        self.assertEqual(wf.source_kind, "langgraph-js")
+        self.assertEqual(wf.node_ids, ["extract", "summarize"])
+        self.assertFalse(any(e.edge_type == "loop" for e in wf.edges))
+        res = analyze_workflow(wf, cfg=Config(trials=200))
+        self.assertEqual(res.risk.gate_decision, "pass")
+
+    def test_imperative_js_loop_recovered_and_blocks(self):
+        wf = self._wf("imperative_loop.js")
+        self.assertEqual(len(wf.llm_nodes()), 1)
+        self.assertTrue(any(e.edge_type == "loop" and e.guard is None for e in wf.edges))
+        res = analyze_workflow(wf, cfg=Config(trials=200))
+        self.assertEqual(res.risk.gate_decision, "block")
+        self.assertTrue(any(f.category == "recursive_loop" for f in res.findings))
+
+    def test_non_graph_js_is_honest_failure(self):
+        """An uncapped call with no loop/graph is NOT force-parsed into a graph."""
+        from tollgate.parsers.javascript import parse_javascript
+        import tempfile
+        src = ("import OpenAI from 'openai';\n"
+               "export async function f(t){ return await openai.chat.completions."
+               "create({model:'gpt-4o', messages:[{role:'user',content:t}]}); }\n")
+        with tempfile.TemporaryDirectory() as d:
+            p = os.path.join(d, "helper.js")
+            with open(p, "w") as fh:
+                fh.write(src)
+            wf = parse_javascript(p)
+            self.assertEqual(wf.nodes, [])           # empty -> dropped -> lint
+
+    def test_blanker_ignores_builders_in_strings_and_comments(self):
+        """addNode/addEdge inside a comment or string must not become a graph."""
+        from tollgate.parsers.javascript import parse_javascript
+        import tempfile
+        src = ('import { StateGraph } from "x";\n'
+               '// g.addNode("ghost", fn); g.addEdge("ghost","gone");\n'
+               'const doc = "call g.addEdge(\\"a\\",\\"b\\") to wire it";\n')
+        with tempfile.TemporaryDirectory() as d:
+            p = os.path.join(d, "decoy.js")
+            with open(p, "w") as fh:
+                fh.write(src)
+            wf = parse_javascript(p)
+            self.assertEqual(wf.nodes, [])           # nothing real to recover
+
+    def test_discovery_picks_graph_js_skips_plain_and_dts(self):
+        from tollgate.parsers import _is_workflow_candidate
+        import tempfile
+        with tempfile.TemporaryDirectory() as d:
+            graph = os.path.join(d, "agent.js")
+            with open(graph, "w") as fh:
+                fh.write('import {StateGraph} from "x";\n'
+                         'new StateGraph(S).addNode("a",f).addEdge("a","b");\n')
+            plain = os.path.join(d, "util.js")
+            with open(plain, "w") as fh:
+                fh.write("export const add=(a,b)=>a+b;\n")
+            dts = os.path.join(d, "types.d.ts")
+            with open(dts, "w") as fh:
+                fh.write('export declare function addNode(x: string): void;\n')
+            self.assertTrue(_is_workflow_candidate(graph))
+            self.assertFalse(_is_workflow_candidate(plain))
+            self.assertFalse(_is_workflow_candidate(dts))
+
+    def test_no_double_count_graph_vs_lint(self):
+        """A JS file recovered as a workflow is not also textual-linted."""
+        run = analyze_path([os.path.join(self.AGENTS, "imperative_loop.js")],
+                           cfg=Config(trials=200))
+        self.assertEqual(len(run.results), 1)
+        self.assertEqual(run.lint_results, [])       # not linted again
+        loop_findings = [f for f in run.results[0].findings
+                         if f.category == "recursive_loop"]
+        self.assertEqual(len(loop_findings), 1)      # exactly one loop finding
+
+    def test_js_workflow_merges_uncapped_output(self):
+        """The graph file still surfaces the uncapped-output cap finding (merged)."""
+        run = analyze_path([os.path.join(self.AGENTS, "imperative_loop.js")],
+                           cfg=Config(trials=200))
+        cats = {f.category for f in run.results[0].findings}
+        self.assertIn("uncapped_output", cats)
+        self.assertIn("recursive_loop", cats)
+
+
+class TestCrossLanguageLint(unittest.TestCase):
+    """Go / Java / Ruby agents aren't parsed into graphs, but the language-agnostic
+    textual lint must still catch the universal risks (unbounded loop around an LLM
+    call, uncapped output) instead of silently producing nothing."""
+
+    AGENTS = os.path.join(ROOT, "examples", "agents")
+
+    def _cats(self, path):
+        from tollgate.agentic_lint import lint_source
+        return {f.category for f in lint_source(path)}
+
+    def test_go_example_flags_loop_and_output(self):
+        cats = self._cats(os.path.join(self.AGENTS, "loop_agent.go"))
+        self.assertIn("unbounded_loop", cats)
+        self.assertIn("uncapped_output", cats)
+
+    def test_java_example_flags_loop_and_output(self):
+        cats = self._cats(os.path.join(self.AGENTS, "LoopAgent.java"))
+        self.assertIn("unbounded_loop", cats)
+        self.assertIn("uncapped_output", cats)
+
+    def test_ruby_example_flags_loop_and_output(self):
+        cats = self._cats(os.path.join(self.AGENTS, "loop_agent.rb"))
+        self.assertIn("unbounded_loop", cats)
+        self.assertIn("uncapped_output", cats)
+
+    def test_examples_block_via_pipeline(self):
+        """End to end: each file blocks — via the textual lint when the tree-sitter
+        backend is absent, or via recovered graph when it's installed. Either way the
+        verdict must be BLOCK (and it must appear exactly once)."""
+        run = analyze_path([self.AGENTS, ], cfg=Config(trials=120))
+        verdict = {}
+        for r in run.results:
+            verdict.setdefault(os.path.basename(r.source_path or ""), []).append(
+                r.risk.gate_decision)
+        for lr in run.lint_results:
+            verdict.setdefault(os.path.basename(lr.source_path or ""), []).append(
+                lr.gate_decision)
+        for name in ("loop_agent.go", "LoopAgent.java", "loop_agent.rb"):
+            self.assertIn(name, verdict, f"{name} produced no verdict")
+            self.assertEqual(len(verdict[name]), 1, f"{name} double-counted")
+            self.assertEqual(verdict[name][0], "block")
+
+    def test_capped_bounded_go_is_quiet(self):
+        from tollgate.agentic_lint import lint_source
+        import tempfile
+        src = ("package main\n"
+               "func run(client *openai.Client) {\n"
+               "  for i := 0; i < 10; i++ {            // bounded\n"
+               "    resp, _ := client.CreateChatCompletion(ctx, openai.ChatCompletionRequest{\n"
+               "      Model: openai.GPT4o, MaxTokens: 500, Messages: msgs})\n"
+               "    _ = resp\n  }\n}\n")
+        with tempfile.TemporaryDirectory() as d:
+            p = os.path.join(d, "ok.go")
+            with open(p, "w") as fh:
+                fh.write(src)
+            cats = {f.category for f in lint_source(p)}
+            self.assertNotIn("unbounded_loop", cats)   # bounded for-loop
+            self.assertNotIn("uncapped_output", cats)  # MaxTokens set
+
+    def test_non_agentic_go_is_silent(self):
+        from tollgate.agentic_lint import lint_source
+        import tempfile
+        src = "package main\nfunc add(a, b int) int { for {} ; return a + b }\n"
+        with tempfile.TemporaryDirectory() as d:
+            p = os.path.join(d, "util.go")
+            with open(p, "w") as fh:
+                fh.write(src)
+            self.assertEqual(lint_source(p), [])       # infinite loop but no LLM call
+
+    def test_ruby_generic_chat_not_an_sdk_call(self):
+        """A non-LLM `.chat(` (no `parameters:`) must not be flagged."""
+        from tollgate.agentic_lint import lint_source
+        import tempfile
+        src = "loop do\n  ui.chat(message)\n  break if done\nend\n"
+        with tempfile.TemporaryDirectory() as d:
+            p = os.path.join(d, "ui.rb")
+            with open(p, "w") as fh:
+                fh.write(src)
+            self.assertEqual(lint_source(p), [])
+
+
+def _treesitter_available():
+    try:
+        from tollgate.parsers import treesitter_backend as tsb
+        return tsb.available()
+    except Exception:
+        return False
+
+
+@unittest.skipUnless(_treesitter_available(),
+                     "tree-sitter backend not installed (pip install 'tollgate[multilang]')")
+class TestTreeSitterGraph(unittest.TestCase):
+    """Real graph recovery for Go/Java/Ruby via the optional tree-sitter backend —
+    parity with the Python/JS parsers. Runs only where the `multilang` extra is
+    installed; skips cleanly otherwise."""
+
+    AGENTS = os.path.join(ROOT, "examples", "agents")
+
+    def _wf(self, name):
+        from tollgate.parsers import parse_treesitter
+        return parse_treesitter(os.path.join(self.AGENTS, name))
+
+    def _assert_self_loop_blocks(self, name, kind):
+        wf = self._wf(name)
+        self.assertEqual(wf.source_kind, kind)
+        self.assertEqual(len(wf.llm_nodes()), 1)
+        self.assertTrue(any(e.edge_type == "loop" and e.guard is None for e in wf.edges))
+        res = analyze_workflow(wf, cfg=Config(trials=150))
+        self.assertEqual(res.risk.gate_decision, "block")
+        self.assertTrue(any(f.category == "recursive_loop" for f in res.findings))
+
+    def test_go_imperative_loop(self):
+        self._assert_self_loop_blocks("loop_agent.go", "imperative-go")
+
+    def test_java_imperative_loop(self):
+        self._assert_self_loop_blocks("LoopAgent.java", "imperative-java")
+
+    def test_ruby_imperative_loop(self):
+        self._assert_self_loop_blocks("loop_agent.rb", "imperative-ruby")
+
+    def test_java_langgraph4j_cycle(self):
+        wf = self._wf("langgraph4j_react.java")
+        self.assertEqual(wf.source_kind, "langgraph4j")
+        self.assertEqual(set(wf.node_ids), {"agent", "tools"})
+        self.assertTrue(any(e.edge_type == "loop" for e in wf.edges))
+        res = analyze_workflow(wf, cfg=Config(trials=150))
+        self.assertEqual(res.risk.gate_decision, "block")
+        self.assertTrue(any(f.category == "recursive_loop" for f in res.findings))
+
+    def test_bounded_for_loop_is_costed_node_without_cycle(self):
+        """A bounded counted for-loop around an SDK call recovers a costed node
+        with NO cycle (parity with the Python imperative parser) — it's real calls
+        worth projecting, but not a recursive-loop risk."""
+        from tollgate.parsers import parse_treesitter
+        import tempfile
+        src = ("package main\n"
+               "func run(client *openai.Client) {\n"
+               "  for i := 0; i < 10; i++ {\n"
+               "    client.CreateChatCompletion(ctx, req)\n  }\n}\n")
+        with tempfile.TemporaryDirectory() as d:
+            p = os.path.join(d, "ok.go")
+            with open(p, "w") as fh:
+                fh.write(src)
+            wf = parse_treesitter(p)
+            self.assertEqual(len(wf.llm_nodes()), 1)
+            self.assertEqual([e for e in wf.edges if e.edge_type == "loop"], [])
+            res = analyze_workflow(wf, cfg=Config(trials=150))
+            self.assertFalse(any(f.category == "recursive_loop" for f in res.findings))
+
+    def test_non_agentic_go_is_empty(self):
+        from tollgate.parsers import parse_treesitter
+        import tempfile
+        src = "package main\nfunc add(a, b int) int { for {} ; return a + b }\n"
+        with tempfile.TemporaryDirectory() as d:
+            p = os.path.join(d, "util.go")
+            with open(p, "w") as fh:
+                fh.write(src)
+            self.assertEqual(parse_treesitter(p).nodes, [])   # no SDK call in loop
+
+    def test_no_double_count_graph_vs_lint(self):
+        run = analyze_path([os.path.join(self.AGENTS, "loop_agent.go")],
+                           cfg=Config(trials=150))
+        self.assertEqual(len(run.results), 1)         # recovered as a graph
+        self.assertEqual(run.lint_results, [])        # not also textual-linted
+        loops = [f for f in run.results[0].findings if f.category == "recursive_loop"]
+        self.assertEqual(len(loops), 1)
+        # cap finding still merged from the lint
+        self.assertIn("uncapped_output",
+                      {f.category for f in run.results[0].findings})
+
+    # --- deep recovery (parity with the Python imperative parser) -------------
+    def _seq_and_loop(self, wf):
+        seq = [e for e in wf.edges if e.edge_type == "sequence"]
+        loop = [e for e in wf.edges if e.edge_type == "loop"]
+        return seq, loop
+
+    def test_multi_node_sequence_go(self):
+        """Two LLM calls per turn -> a 2-node chain (plan -> act) plus a cycle."""
+        wf = self._wf("multi_step.go")
+        self.assertEqual(len(wf.llm_nodes()), 2)
+        seq, loop = self._seq_and_loop(wf)
+        self.assertEqual(len(seq), 1)                 # plan -> act
+        self.assertEqual(len(loop), 1)               # act -> plan (back-edge)
+
+    def test_multi_node_sequence_java(self):
+        wf = self._wf("MultiStep.java")
+        self.assertEqual(len(wf.llm_nodes()), 2)
+        seq, loop = self._seq_and_loop(wf)
+        self.assertEqual(len(seq), 1)
+        self.assertEqual(len(loop), 1)
+
+    def test_multi_node_sequence_ruby(self):
+        wf = self._wf("multi_step.rb")
+        self.assertEqual(len(wf.llm_nodes()), 2)
+        seq, loop = self._seq_and_loop(wf)
+        self.assertEqual(len(seq), 1)
+        self.assertEqual(len(loop), 1)
+
+    def test_wrapper_call_chain_go(self):
+        """The loop calls a wrapper that issues the SDK call: the node is sited at
+        the wrapper, and the SDK call inside it is not double-counted."""
+        wf = self._wf("wrapper_loop.go")
+        self.assertEqual([n.node_id for n in wf.llm_nodes()], ["callLLM"])
+        _, loop = self._seq_and_loop(wf)
+        self.assertEqual(len(loop), 1)
+
+    def test_bounded_loop_has_guard_go(self):
+        """A bounded condition loop recovers a guarded (non-critical) cycle."""
+        wf = self._wf("bounded_loop.go")
+        self.assertEqual(len(wf.llm_nodes()), 1)
+        _, loop = self._seq_and_loop(wf)
+        self.assertEqual(len(loop), 1)
+        self.assertIsNotNone(loop[0].guard)          # bounded -> guard present
+        self.assertTrue(loop[0].guard.is_bounded)
+        res = analyze_workflow(wf, cfg=Config(trials=150))
+        # guarded loop is not a critical unbounded cycle
+        crit = [f for f in res.findings
+                if f.category == "recursive_loop" and f.severity == "critical"]
+        self.assertEqual(crit, [])
 
 
 if __name__ == "__main__":

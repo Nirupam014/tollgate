@@ -19,12 +19,12 @@ code it scans.**
 
 ## What it does
 
-1. **Parses agent workflows & prompts → a normalized IR.** LangGraph, **CrewAI** (`Agent`/`Task`/`Crew`, flags hierarchical/delegation loops), AutoGPT block-graph exports, **any hand-rolled imperative agent** (a `while`/`for` loop around a recognized LLM SDK call — framework-agnostic), a native YAML/JSON DSL, and raw prompt templates.
+1. **Parses agent workflows & prompts → a normalized IR (Python *and* JavaScript/TypeScript).** Python: LangGraph, **CrewAI** (`Agent`/`Task`/`Crew`, flags hierarchical/delegation loops), AutoGPT block-graph exports, and any hand-rolled imperative agent (a `while`/`for` loop around a recognized LLM SDK call). **JavaScript/TypeScript: LangGraph.js** (`StateGraph`/`MessageGraph` — `addNode`/`addEdge`/`addConditionalEdges`) and **imperative JS/TS agents** (an infinite loop around an LLM SDK call) are recovered into the *same* IR and run through the *same* detectors, prediction, and scoring as Python — so a JS agent's unbounded `agent↔tools` cycle is caught exactly like a Python one. **Go, Java, and Ruby** reach full graph parity with the optional `multilang` extra (tree-sitter): hand-rolled agents are recovered with the same fidelity as the Python parser — multiple LLM calls per turn become an ordered node chain, thin LLM wrappers are resolved through the call graph (the node is sited at the wrapper, not double-counted), and loop guards are classified (an unbounded `while(true)` / `for {}` / `loop do` is a critical cycle; a bounded counted or `break`-terminated loop is a guarded one) — plus the **LangGraph4j** builder (`StateGraph` `addNode`/`addEdge`/`addConditionalEdges`) in Java. Plus a native YAML/JSON DSL and raw prompt templates. JS/TS recovery is stdlib-only (no Node, no tree-sitter); Go/Java/Ruby recovery uses tree-sitter when installed and otherwise falls back to the advisory textual lint. Everything is deterministic, and the analyzer never claims a graph it didn't recover (honest failure → lint).
 2. **Predicts token consumption** — per-node input/output distributions (p50/p95/p99), exact with `tiktoken` or a deterministic heuristic otherwise.
 3. **Simulates cost under traffic** — Monte-Carlo over a configurable base (default **10,000 requests/week**; override per run with `--traffic-per-week` / `--traffic-per-day`).
 4. **Detects context explosion** — history/retrieval growth inside loops vs. the model's context limit.
 5. **Detects recursive/delegation loops** — Tarjan SCC + termination-guard analysis; unbounded cycles are critical.
-6. **Strict agentic lint** — a source-level reviewer for *agentic-specific* risks only: unbounded loops, **missing iteration/recursion caps** (LangChain `AgentExecutor`, AutoGen `GroupChat`/teams, LlamaIndex `ReActAgent`, smolagents `CodeAgent`, CrewAI `max_iter`, LangGraph `recursion_limit`), **uncapped output tokens** (including LangChain/LlamaIndex model wrappers), and **unbounded fan-out**. It reaches frameworks it can't fully graph and stays silent on non-agentic code. Tunable: `lint_strictness: strict | balanced | off`.
+6. **Strict agentic lint** — a source-level reviewer for *agentic-specific* risks only: unbounded loops, **missing iteration/recursion caps** (LangChain `AgentExecutor`, AutoGen `GroupChat`/teams, LlamaIndex `ReActAgent`, smolagents `CodeAgent`, CrewAI `max_iter`, LangGraph `recursion_limit`), **uncapped output tokens** (including LangChain/LlamaIndex model wrappers), and **unbounded fan-out**. Python gets high-fidelity AST checks. Other languages get a deterministic, advisory textual pass that flags the two universal risks — an infinite loop wrapping an LLM call, and an LLM call with no output cap. Many go further into **full graph analysis** (see capability 1): JS/TS always (stdlib), and **Go/Java/Ruby with the optional `multilang` extra** (tree-sitter). Whatever can't be recovered into a graph still gets this textual pass, and it stays silent on non-agentic code. Tunable: `lint_strictness: strict | balanced | off`.
 7. **Recommends cheaper models** — re-prices each node under safe alternatives (a cost lever; same token volume).
 8. **Generates a deployment risk score** — 0–100 with a `pass | warn | block` gate and driver breakdown.
 9. **Integrates with GitHub & GitLab** — a GitHub Action (check-run + PR comment + SARIF), a GitLab CI template (Code Quality + pipeline gate), and a pre-commit hook.
@@ -41,6 +41,7 @@ Ollama, Hugging Face, and LiteLLM — plus LangChain and LlamaIndex model wrappe
 ```bash
 pip install tollgate                  # core (deterministic heuristic tokenizer)
 pip install "tollgate[tokenizers]"    # + tiktoken for exact OpenAI-family counts
+pip install "tollgate[multilang]"     # + tree-sitter: graph recovery for Go/Java/Ruby
 pip install ./tollgate                # from source
 ```
 
@@ -49,12 +50,14 @@ pip install ./tollgate                # from source
 ```bash
 tollgate analyze ./agents ./prompts --fail-on block   # scan & gate
 tollgate analyze ./agents --traffic-per-week 50000    # set the traffic estimate
+tollgate analyze ./agents --baseline base.json        # PR-delta: gate only NEW risk
 tollgate init                                         # write a starter .tollgate.yml
 tollgate models                                       # inspect the model catalog
 tollgate verify report.json ./agents                  # re-derive & detect a tampered/stale report
 ```
 
 Exit codes: `0` pass/warn, `1` block (or warn with `--fail-on warn`), `2` usage error.
+With `--baseline`, the exit code reflects the **delta gate** (new/worsened findings only).
 
 Try the bundled examples:
 
@@ -80,6 +83,34 @@ and always deletes the clone. It never modifies the scanned repo.
 - **GitHub:** add `.github/workflows/tollgate.yml` (see `ci-templates/github-workflow.yml`); posts a sticky PR comment, uploads SARIF, fails the check on `block`. Make it a required status check to block merges.
 - **GitLab:** add `ci-templates/.gitlab-ci.yml`; publishes a Code Quality report and fails the pipeline on `block`.
 - **Local:** `ci-templates/.pre-commit-hooks.yaml`.
+
+## PR-delta gating — gate the change, not the repo
+
+Blocking a pull request on pre-existing issues the author never touched is exactly
+how CI gates get switched off. In PR mode Tollgate answers the right question —
+*does this change make things worse?* — by diffing the run against a **baseline**
+report and gating only on **new or worsened** findings. Pre-existing findings are
+reported as `unchanged` and never fail the check; resolved ones show up as `fixed`.
+
+```bash
+# On your default branch (or any reference point), capture a baseline:
+tollgate analyze ./agents ./prompts -o json=tollgate-baseline.json
+
+# In the PR, gate on the delta — only NEW/worsened findings can fail the build:
+tollgate analyze ./agents ./prompts --baseline tollgate-baseline.json --fail-on block
+```
+
+In GitHub Actions just set `pr-delta: "true"` (and `fetch-depth: 0` on checkout):
+the Action builds the baseline from the PR's base commit automatically, so a PR
+that introduces a new unbounded loop is blocked while a legacy one in untouched
+code is reported but doesn't fail the merge. The delta is shown as the headline of
+the PR comment / dashboard, with the whole-repo gate kept for context.
+
+Finding identity is **line-number-independent** (category + file + node + a
+digit-normalized message), so unrelated edits above a finding don't make it look
+new, while a genuinely new occurrence — even one that normalizes to an existing
+issue — still counts. It is pure data-over-data, so it works the same for every
+language layer (graph findings, Python AST lint, the language-agnostic textual lint).
 
 ## Configuration — `.tollgate.yml`
 

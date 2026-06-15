@@ -19,7 +19,7 @@ from typing import List, Optional
 
 from .catalog import ModelCatalog
 from .config import Config
-from .pipeline import analyze_path, RunResult
+from .pipeline import analyze_path, apply_baseline, RunResult
 from . import report as report_mod
 from .version import __version__
 
@@ -44,6 +44,11 @@ def main(argv: Optional[List[str]] = None) -> int:
                     help="format=path to write a report to a file, e.g. markdown=report.md")
     pa.add_argument("--fail-on", choices=["block", "warn", "never"],
                     help="Severity that causes a non-zero exit. Overrides config.")
+    pa.add_argument("--baseline", metavar="REPORT.json",
+                    help="PR-delta mode: gate on the difference vs this baseline "
+                    "report.json (only NEW or WORSENED findings can fail the build; "
+                    "pre-existing issues are reported but never block). Produce the "
+                    "baseline on your default branch with `-o json=baseline.json`.")
     pa.add_argument("--default-model", help="Fallback model id when a node declares none.")
     pa.add_argument("--no-prompt-review", dest="prompt_review", action="store_false",
                     default=None, help="Disable the prompt efficiency reviewer "
@@ -168,6 +173,15 @@ def _cmd_analyze(args) -> int:
 
     run = analyze_path(args.paths, cfg=cfg, catalog=catalog)
 
+    if args.baseline:
+        from .baseline import load_baseline
+        try:
+            baseline = load_baseline(args.baseline)
+        except (OSError, ValueError) as e:
+            print(f"error: could not read baseline {args.baseline}: {e}", file=sys.stderr)
+            return 2
+        apply_baseline(run, baseline, cfg)
+
     formats = args.format or ["terminal"]
     # Always print the primary (first) format to stdout.
     primary = formats[0]
@@ -216,7 +230,9 @@ def _render(run: RunResult, fmt: str) -> str:
 
 
 def _exit_code(run: RunResult, fail_on: str) -> int:
-    gate = run.gate_decision
+    # In PR-delta mode the effective gate is the delta gate (new/worsened only),
+    # so a PR is never failed by pre-existing risk it didn't introduce.
+    gate = run.effective_gate
     if fail_on == "never":
         return 0
     if fail_on == "warn":

@@ -26,6 +26,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0            # needed so PR-delta can read the base commit
 
       # If you published the action: uses: nirupam014/tollgate@v1
       - name: Tollgate
@@ -33,6 +35,9 @@ jobs:
         with:
           paths: "agents prompts"     # adjust to where your workflows live
           fail-on: block
+          pr-delta: "true"            # gate on the CHANGE: only new/worsened
+                                      # findings fail the PR; pre-existing risk in
+                                      # untouched code is reported but never blocks.
           comment: "true"
           upload-sarif: "true"
 

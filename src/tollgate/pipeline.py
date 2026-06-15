@@ -23,6 +23,8 @@ from .forecast import build_forecast, Forecast
 from .ir import Workflow
 from .parsers import discover, parse_file
 from .parsers import _SKIP_DIR_SEGMENTS  # noqa: reuse the scan dir-prune set
+from .parsers.javascript import JS_EXTS
+from .parsers.treesitter_multilang import TS_EXTS
 from .policy import PolicyEngine, load_policies
 from .prompt_scan import DetectedPrompt, SCANNABLE_EXTS, scan_file
 from .prediction import PredictionEngine, WorkflowPrediction
@@ -92,6 +94,7 @@ class RunResult:
     lint_results: List["LintResult"] = field(default_factory=list)
     detected_prompts: List["DetectedPrompt"] = field(default_factory=list)  # advisory
     fingerprint: Optional[str] = None     # tamper-evident digest of inputs + verdict
+    baseline_diff: Optional[Dict] = None  # PR-delta vs a baseline report (if --baseline)
 
     @property
     def gate_decision(self) -> str:
@@ -110,8 +113,16 @@ class RunResult:
         return max([r.risk.score for r in self.results]
                    + [lr.score for lr in self.lint_results], default=0)
 
+    @property
+    def effective_gate(self) -> str:
+        """The gate CI should act on: the delta gate when running against a
+        baseline (PR mode), otherwise the whole-repo gate."""
+        if self.baseline_diff is not None:
+            return self.baseline_diff.get("delta_gate", self.gate_decision)
+        return self.gate_decision
+
     def to_dict(self):
-        return {
+        d = {
             "gate_decision": self.gate_decision,
             "max_score": self.max_score,
             "workflow_count": len(self.results),
@@ -122,6 +133,9 @@ class RunResult:
             "lint_results": [lr.to_dict() for lr in self.lint_results],
             "detected_prompts": [p.to_dict() for p in self.detected_prompts],
         }
+        if self.baseline_diff is not None:
+            d["baseline_diff"] = self.baseline_diff
+        return d
 
     def verdict_digest(self) -> str:
         """A canonical, order-stable digest of just the *verdict* (gate, scores,
@@ -191,7 +205,12 @@ def analyze_workflow(wf: Workflow, cfg: Optional[Config] = None,
     # already owns recursive_loop / fanout, so only the non-overlapping lint
     # categories are merged here to avoid double-counting.
     lint_findings: List[Finding] = []
-    if cfg.agentic_lint and wf.source_path and wf.source_path.endswith(".py"):
+    _ext = os.path.splitext(wf.source_path)[1].lower() if wf.source_path else ""
+    if cfg.agentic_lint and wf.source_path and (_ext == ".py" or _ext in JS_EXTS
+                                                 or _ext in TS_EXTS):
+        # Merge only the non-overlapping cap/output/fanout categories. Loop
+        # findings are owned by the graph detectors (recursive_loop), so the
+        # linter's unbounded_loop is intentionally excluded to avoid double count.
         lint_findings = [f for f in lint_source(wf.source_path, cfg.lint_strictness)
                          if f.category in LINT_MERGE_CATEGORIES]
         findings = findings + lint_findings
@@ -264,10 +283,70 @@ def analyze_path(paths, cfg: Optional[Config] = None,
         lr = _lint_only(fpath, cfg)
         if lr is not None:
             run.lint_results.append(lr)
+    if cfg.agentic_lint:
+        # Files already recovered into a workflow graph are analyzed (and their
+        # cap/output lint merged) above — don't also textual-lint them, or loops
+        # would be double-reported.
+        parsed = {r.source_path for r in run.results if r.source_path}
+        run.lint_results.extend(_lint_non_python(paths, cfg, skip_paths=parsed))
     if cfg.prompt_scan:
         run.detected_prompts = _scan_prompts(paths, cfg)
     run.fingerprint = _fingerprint(run, cfg)
     return run
+
+
+def apply_baseline(run: "RunResult", baseline: Dict, cfg: Optional[Config] = None) -> "RunResult":
+    """Attach a PR-delta diff (current run vs a baseline report dict) to the run.
+
+    After this call ``run.baseline_diff`` is populated and ``run.effective_gate``
+    returns the delta gate (new/worsened findings only) instead of the whole-repo
+    gate. Pure data-over-data; safe for every language layer."""
+    from .baseline import diff_reports
+    cfg = cfg or Config()
+    run.baseline_diff = diff_reports(
+        run.to_dict(), baseline,
+        block_at_score=cfg.block_at_score, warn_at_score=cfg.warn_at_score,
+    )
+    return run
+
+
+def _lint_non_python(paths, cfg: Config, skip_paths=None) -> List["LintResult"]:
+    """Run the language-agnostic textual linter over non-Python source (.py is
+    already covered by discovery + the AST linter). Advisory, like the Python
+    lint-only path: a LintResult only when the file is agentic and has findings.
+
+    ``skip_paths`` are files already recovered into a workflow graph (e.g. a
+    LangGraph.js file), whose structural findings come from the detectors — they
+    must not also be textual-linted here."""
+    out: List[LintResult] = []
+    seen = set(skip_paths or ())
+    scorer = RiskScorer(block_at_score=cfg.block_at_score, warn_at_score=cfg.warn_at_score)
+
+    def consider(fp: str):
+        if fp in seen:
+            return
+        seen.add(fp)
+        ext = os.path.splitext(fp)[1].lower()
+        if ext == ".py" or ext not in SCANNABLE_EXTS:
+            return
+        findings = lint_source(fp, cfg.lint_strictness)
+        if not findings:
+            return
+        gate = worse_gate(scorer.score(findings).gate_decision,
+                          lint_gate(findings, cfg.lint_strictness))
+        out.append(LintResult(source_path=fp, source_kind=f"agentic-lint:{ext.lstrip('.')}",
+                              findings=findings, gate_decision=gate,
+                              score=scorer.score(findings).score))
+
+    for p in paths:
+        if os.path.isfile(p):
+            consider(p)
+        elif os.path.isdir(p):
+            for root, dirs, files in os.walk(p):
+                dirs[:] = [d for d in dirs if d.lower() not in _SKIP_DIR_SEGMENTS]
+                for f in files:
+                    consider(os.path.join(root, f))
+    return out
 
 
 def _scan_prompts(paths, cfg: Config) -> List["DetectedPrompt"]:
