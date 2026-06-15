@@ -5,8 +5,11 @@ so the dashboard is produced in the same ``tollgate analyze`` run as the json /
 markdown / sarif reports. The data is derived from ``run.to_dict()`` — the same
 payload the json reporter emits — so the dashboard never drifts from the report.
 
-The output is a single file with no build step: charts use Chart.js from a CDN,
-and the analysis payload is inlined as a JSON blob the page reads on load.
+The output is a single, fully self-contained file with no build step and **no
+external resources**: the analysis payload is inlined as a JSON blob the page
+reads on load, and the bar charts are rendered with plain inline HTML/CSS (no
+charting library, no CDN), so the report renders identically offline, in a
+sandboxed file preview, and in any CI artifact viewer.
 
 Because this runs *inside* ``tollgate analyze`` (before any scan-script cleanup),
 the scanned source files still exist on disk, so we resolve exact line numbers for
@@ -433,7 +436,13 @@ BASE_CSS = r"""
   .delta .ct.n{color:#b42318} .delta .ct.w{color:#b45309} .delta .ct.f{color:#067a55} .delta .ct.u{color:var(--muted)}
   .delta table{margin-top:10px;background:#fff;border-radius:10px;overflow:hidden}
   .delta .sub{color:var(--muted);font-size:12px;margin-top:6px}
-  .barwrap{height:230px}
+  .barwrap{min-height:120px;display:flex;flex-direction:column;justify-content:center}
+  /* dependency-free horizontal bars (replaces the old canvas charts) */
+  .hbar{display:grid;grid-template-columns:130px 1fr 96px;align-items:center;gap:10px;margin:7px 0;font-size:12px}
+  .hbar-l{color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .hbar-t{background:var(--line2);border-radius:6px;height:16px;overflow:hidden}
+  .hbar-f{height:100%;border-radius:6px;min-width:2px;transition:width .2s}
+  .hbar-v{text-align:right;font-weight:600;color:var(--text);white-space:nowrap}
   .empty{color:var(--faint);font-size:13px;padding:22px 6px;text-align:center}
   .caret{display:inline-block;width:12px;color:var(--faint);transition:transform .15s}
   tr.open .caret{transform:rotate(90deg);color:var(--accent)}
@@ -487,7 +496,6 @@ _TEMPLATE = r"""<!DOCTYPE html>
 <meta charset="utf-8"/>
 <meta name="viewport" content="width=device-width, initial-scale=1"/>
 <title>Tollgate Scan Report</title>
-<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
 <style>
 __BASE_CSS__
 </style>
@@ -512,11 +520,11 @@ __BASE_CSS__
   <div class="grid">
     <div class="card">
       <h2>Model mix <span class="badge" id="modelCount"></span></h2>
-      <div class="barwrap"><canvas id="modelChart"></canvas></div>
+      <div class="barwrap" id="modelBars"></div>
     </div>
     <div class="card">
       <h2>Model right-sizing (cost lever) <span class="badge" id="recCount"></span></h2>
-      <div class="barwrap"><canvas id="recChart"></canvas></div>
+      <div class="barwrap" id="recBars"></div>
       <div class="note" id="recNote"></div>
     </div>
   </div>
@@ -689,38 +697,41 @@ document.getElementById('findCount').textContent = D.total_findings + ' total';
 document.getElementById('wfCount').textContent = D.workflows + ' total';
 
 const PALETTE = ['#2563eb','#0f9d6e','#d97706','#dc2626','#7c3aed','#0891b2','#ea580c','#db2777','#64748b','#16a34a'];
-Chart.defaults.color = '#5d6b82';
-Chart.defaults.font.family = "-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif";
 
-const mk = Object.keys(D.models), mv = mk.map(k=>D.models[k]);
-if(mk.length){
-  new Chart(document.getElementById('modelChart'), {
-    type:'bar',
-    data:{labels:mk, datasets:[{data:mv, backgroundColor:mk.map((_,i)=>PALETTE[i%PALETTE.length]), borderRadius:6, maxBarThickness:34}]},
-    options:{indexAxis:'y', plugins:{legend:{display:false}, tooltip:{callbacks:{label:c=>c.parsed.x+' node(s)'}}},
-      scales:{x:{grid:{color:'#e8edf4'},ticks:{precision:0}}, y:{grid:{display:false}}}}
-  });
-} else { document.getElementById('modelChart').parentElement.innerHTML = '<div class="empty">No LLM nodes detected.</div>'; }
+// Dependency-free horizontal bar chart (no charting lib / CDN). items:
+//   {label, value, valLabel?, suffix?}  — bar length is value / max.
+function hbars(el, items, empty){
+  if(!el) return;
+  if(!items.length){ el.innerHTML = '<div class="empty">'+esc(empty)+'</div>'; return; }
+  const max = Math.max.apply(null, items.map(i=>i.value).concat([1]));
+  el.innerHTML = items.map((it,idx)=>{
+    const w = Math.max(2, Math.round((it.value/max)*100));
+    const color = PALETTE[idx % PALETTE.length];
+    const v = (it.valLabel!=null ? it.valLabel : it.value);
+    return '<div class="hbar"><div class="hbar-l" title="'+esc(it.label)+'">'+esc(it.label)+'</div>'+
+      '<div class="hbar-t"><div class="hbar-f" style="width:'+w+'%;background:'+color+'"></div></div>'+
+      '<div class="hbar-v">'+esc(v)+esc(it.suffix||'')+'</div></div>';
+  }).join('');
+}
 
+const mk = Object.keys(D.models);
+hbars(document.getElementById('modelBars'),
+  mk.map(k=>({label:k, value:D.models[k], valLabel:D.models[k],
+              suffix:' node'+(D.models[k]===1?'':'s')})),
+  'No LLM nodes detected.');
+
+hbars(document.getElementById('recBars'),
+  D.swaps.map(s=>({label:s.from+' → '+s.to, value:s.avg_savings, valLabel:s.avg_savings,
+                   suffix:'% · '+s.count+'×'})),
+  'No cheaper substitutions recommended.');
 if(D.swaps.length){
-  const rl = D.swaps.map(s=>s.from+' → '+s.to);
-  new Chart(document.getElementById('recChart'), {
-    type:'bar',
-    data:{labels:rl, datasets:[
-      {label:'Avg savings %', data:D.swaps.map(s=>s.avg_savings), backgroundColor:'#0f9d6e', borderRadius:6, yAxisID:'y', maxBarThickness:30},
-      {label:'# nodes', data:D.swaps.map(s=>s.count), backgroundColor:'#2563eb', borderRadius:6, yAxisID:'y1', maxBarThickness:30}
-    ]},
-    options:{plugins:{legend:{position:'bottom',labels:{boxWidth:12,padding:14}},
-        tooltip:{callbacks:{label:c=>c.dataset.label+': '+c.parsed.y+(c.datasetIndex===0?'%':'')}}},
-      scales:{x:{grid:{display:false},ticks:{font:{size:10}}},
-        y:{position:'left',grid:{color:'#e8edf4'},title:{display:true,text:'savings %'},max:100},
-        y1:{position:'right',grid:{display:false},title:{display:true,text:'# nodes'},ticks:{precision:0}}}}
-  });
   const top = D.swaps[0];
   document.getElementById('recNote').innerHTML =
     'Largest lever: <b>'+esc(top.count)+'× '+esc(top.from)+' → '+esc(top.to)+
     '</b> at ~'+top.avg_savings+'% token-cost reduction per call. See the detail table below for exact code paths.';
-} else { document.getElementById('recChart').parentElement.innerHTML = '<div class="empty">No cheaper substitutions recommended.</div>'; }
+} else {
+  document.getElementById('recNote').innerHTML = '';
+}
 
 // --- Findings: expandable rows with exact file:line + remediation (#4) ---------
 const fb = document.querySelector('#findTable tbody');

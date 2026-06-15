@@ -1000,8 +1000,11 @@ class TestReportFormats(unittest.TestCase):
         html = report.to_html(run)
         # Self-contained, single-file dashboard with the data inlined.
         self.assertIn("<!DOCTYPE html>", html)
-        self.assertIn("Chart.js", html)
         self.assertNotIn("__TOLLGATE_DATA__", html)  # placeholder must be substituted
+        # Fully self-contained: no external scripts / CDN (charts are inline HTML/CSS).
+        self.assertNotIn("cdnjs", html)
+        self.assertNotIn("<script src", html)
+        self.assertIn("hbars(", html)            # the dependency-free bar renderer
 
         # The injected blob must be valid JSON and match the report payload.
         blob = html.split("const D = ", 1)[1].split(";\n", 1)[0]
