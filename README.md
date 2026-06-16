@@ -39,11 +39,21 @@ Ollama, Hugging Face, and LiteLLM — plus LangChain and LlamaIndex model wrappe
 ## Install
 
 ```bash
-pip install tollgate                  # core (deterministic heuristic tokenizer)
-pip install "tollgate[tokenizers]"    # + tiktoken for exact OpenAI-family counts
-pip install "tollgate[multilang]"     # + tree-sitter: graph recovery for Go/Java/Ruby
-pip install ./tollgate                # from source
+pip install tollgate-ci                  # core (deterministic heuristic tokenizer)
+pip install "tollgate-ci[tokenizers]"    # + tiktoken for exact OpenAI-family counts
+pip install "tollgate-ci[multilang]"     # + tree-sitter: graph recovery for Go/Java/Ruby
+pip install "tollgate-ci[tokenizers,multilang]"   # everything
+
+# pin to a release straight from GitHub (before/without PyPI):
+pip install "git+https://github.com/Nirupam014/tollgate@v0.2.0"
+pip install ./tollgate                   # from a local checkout
 ```
+
+The PyPI package is **`tollgate-ci`**, but the import module and CLI command stay
+`tollgate` (e.g. `import tollgate`, `tollgate analyze ...`). Core install is stdlib
++ PyYAML only, so it drops into any CI. The `multilang` extra (tree-sitter) is
+optional; without it Go/Java/Ruby fall back to the advisory textual lint instead
+of full graph recovery (never an error).
 
 ## Quick start
 
@@ -80,9 +90,56 @@ and always deletes the clone. It never modifies the scanned repo.
 
 ## GitHub / GitLab / pre-commit
 
-- **GitHub:** add `.github/workflows/tollgate.yml` (see `ci-templates/github-workflow.yml`); posts a sticky PR comment, uploads SARIF, fails the check on `block`. Make it a required status check to block merges.
+- **GitHub:** add `.github/workflows/tollgate.yml` (see `ci-templates/github-workflow.yml`); posts a sticky PR comment, uploads SARIF, fails the check on `block`. Make it a required status check to block merges. The Action installs the `multilang` extra by default (set `multilang: "false"` to skip it).
 - **GitLab:** add `ci-templates/.gitlab-ci.yml`; publishes a Code Quality report and fails the pipeline on `block`.
 - **Local:** `ci-templates/.pre-commit-hooks.yaml`.
+
+## Use it in your pipeline
+
+Tollgate ships as a normal Python package with a `tollgate` console command, so it
+plugs into a pipeline several ways:
+
+**GitHub Action** (most common — gate the PR):
+
+```yaml
+- uses: actions/checkout@v4
+  with: { fetch-depth: 0 }      # needed for pr-delta
+- uses: Nirupam014/tollgate@v1
+  with:
+    paths: "agents prompts"
+    fail-on: block
+    pr-delta: "true"            # gate only new/worsened risk
+    multilang: "true"           # Go/Java/Ruby graph recovery (default)
+```
+
+**As a CLI** in any CI (after `pip install tollgate-ci`):
+
+```bash
+tollgate analyze ./agents --fail-on block -o sarif=tollgate.sarif
+```
+
+**As a container** (no Python setup in the runner):
+
+```bash
+docker run --rm -v "$PWD:/repo" ghcr.io/nirupam014/tollgate analyze /repo --fail-on block
+# or build locally: docker build -t tollgate . && docker run --rm -v "$PWD:/repo" tollgate analyze /repo
+```
+
+**As a library** (programmatic use):
+
+```python
+from tollgate.pipeline import analyze_path
+from tollgate.config import Config
+
+run = analyze_path(["agents", "prompts"], cfg=Config())
+print(run.gate_decision, run.max_score)           # 'block' | 'warn' | 'pass', 0-100
+for r in run.results:
+    for f in r.findings:
+        print(r.workflow_id, f.severity, f.category, f.message)
+```
+
+Releases are published to PyPI automatically on a version tag (`v*`) via the
+`release.yml` workflow using PyPI Trusted Publishing.
 
 ## PR-delta gating — gate the change, not the repo
 

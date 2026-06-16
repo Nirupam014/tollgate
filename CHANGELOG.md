@@ -6,7 +6,14 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.2.0] — 2026-06-16
+
 ### Added
+- **Distribution.** Published to PyPI as `tollgate-ci` (`pip install tollgate-ci`,
+  plus the `tokenizers` and `multilang` extras; the import module and CLI command
+  remain `tollgate`); the GitHub composite Action now installs
+  the `multilang` extra by default so Go/Java/Ruby graph recovery is active in CI;
+  a container image and a tag-triggered PyPI release workflow are included.
 - **Built-in intent classifier for substitution.** A deterministic
   lexical-embedding classifier (token vector + cosine over per-domain prototype
   lexicons, `intent.py`) infers each node's task domain (code, reasoning, math,
@@ -136,5 +143,6 @@ Initial public release.
   calibration, plus sampled-precision tooling (sample/precision/recall + an
   independent auto-triage oracle).
 
-[Unreleased]: https://github.com/nirupam014/tollgate/compare/v0.1.0...HEAD
-[0.1.0]: https://github.com/nirupam014/tollgate/releases/tag/v0.1.0
+[Unreleased]: https://github.com/Nirupam014/tollgate/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/Nirupam014/tollgate/compare/v0.1.0...v0.2.0
+[0.1.0]: https://github.com/Nirupam014/tollgate/releases/tag/v0.1.0

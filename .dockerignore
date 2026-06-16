@@ -1,0 +1,12 @@
+.git
+.github
+__pycache__
+*.pyc
+*.egg-info
+.venv
+venv
+dist
+build
+tollgate-reports
+docs
+.pytest_cache
