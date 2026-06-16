@@ -6,6 +6,19 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Changed
+- **Model substitution is now dynamic and requirement-driven.** It no longer
+  depends on the hand-maintained `substitutions:` edge list. For each node it
+  derives a requirement profile from the workflow — a capability floor implied by
+  the task class, the context window the node's predicted p95 tokens need, the
+  max-output, whether the node/workflow uses tools, and the provider allowlist —
+  then searches the **whole catalog** for the cheapest model that satisfies it.
+  Curated capability scores, when present, only refine the reported confidence (a
+  curated swap below `min_capability` is still skipped); everything else is gated
+  by the derived requirements. Deterministic, no LLM calls. Quality beyond the
+  tier floor isn't verifiable, so the recommendation stays advisory — set a
+  `model_allowlist` policy to constrain swaps to your providers.
+
 ### Added
 - **Graph parity for Go, Java, and Ruby (optional `multilang` extra).** With
   `pip install "tollgate[multilang]"` (tree-sitter), these languages are recovered

@@ -1537,5 +1537,80 @@ class TestTreeSitterGraph(unittest.TestCase):
         self.assertEqual(crit, [])
 
 
+class TestDynamicSubstitution(unittest.TestCase):
+    """Substitution is requirement-driven: it searches the whole catalog and picks
+    the cheapest model that supports the node (task->tier floor, context window,
+    max-output, tool calling), not a hand-wired edge list."""
+
+    def _model(self, mid, tier, ctx, mx, tools, cin, cout, self_hosted=False):
+        from tollgate.catalog import Model
+        return Model(id=mid, provider="p", family="f", context_limit=ctx, max_output=mx,
+                     quality_tier=tier, supports_tools=tools, tokenizer="heuristic",
+                     input_per_mtok=cin, output_per_mtok=cout, self_hosted=self_hosted)
+
+    def _catalog(self, subs=None):
+        from tollgate.catalog import ModelCatalog
+        models = [
+            self._model("big", 5, 200000, 16384, True, 10.0, 30.0),
+            self._model("mid", 3, 200000, 16384, True, 1.0, 3.0),
+            self._model("cheapmid", 3, 200000, 16384, True, 0.5, 1.5),
+            self._model("tiny", 1, 8000, 4096, True, 0.1, 0.1),
+            self._model("smallctx", 3, 4000, 2048, True, 0.2, 0.2),
+            self._model("notools", 3, 200000, 16384, False, 0.2, 0.2),
+        ]
+        return ModelCatalog(models, subs or [])
+
+    def _wf_pred(self, task=None, in50=2000, out50=500, intended="big"):
+        from tollgate.ir import IRNode, Workflow
+        from tollgate.prediction import Dist, NodePrediction, WorkflowPrediction
+        node = IRNode(node_id="n", kind="llm_call", intended_model=intended, task_class=task)
+        wf = Workflow(workflow_id="w", source_kind="dsl", nodes=[node], edges=[], entry="n")
+        npd = NodePrediction("n", intended, Dist(in50, in50 * 1.5, in50 * 2),
+                             Dist(out50, out50 * 1.6, out50 * 2), 1.0, "t", 0.9)
+        pred = WorkflowPrediction("w", [npd], Dist(0, 0, 0), Dist(0, 0, 0), 0.9, "t")
+        return wf, pred
+
+    def _rec(self, task=None, subs=None, min_cap=0.72, min_sav=15.0, **kw):
+        from tollgate.substitution import SubstitutionEngine
+        cat = self._catalog(subs)
+        wf, pred = self._wf_pred(task=task, **kw)
+        eng = SubstitutionEngine(cat, min_capability=min_cap, min_savings_pct=min_sav,
+                                 default_model="big")
+        return eng.recommend(wf, pred)
+
+    def test_picks_cheapest_qualifying(self):
+        recs = self._rec(task="tool")
+        self.assertEqual(len(recs), 1)
+        self.assertEqual(recs[0].to_model, "cheapmid")   # cheapest tier>=2, tools, ctx ok
+
+    def test_tool_gating_excludes_no_tool_models(self):
+        recs = self._rec(task="tool")
+        self.assertNotEqual(recs[0].to_model, "notools")
+
+    def test_context_gating_excludes_small_windows(self):
+        recs = self._rec(task="routing", in50=10000)   # needs a big context window
+        self.assertTrue(recs)
+        self.assertNotIn(recs[0].to_model, ("tiny", "smallctx"))
+
+    def test_reasoning_not_downgraded(self):
+        # reasoning floor is tier 4; nothing cheaper than the tier-5 current qualifies
+        self.assertEqual(self._rec(task="reasoning"), [])
+
+    def test_min_savings_respected(self):
+        self.assertEqual(self._rec(task="tool", min_sav=99.9), [])
+
+    def test_curated_capability_floor_skips_weak_known_pair(self):
+        from tollgate.catalog import Substitution
+        recs = self._rec(task="tool", subs=[Substitution("big", "cheapmid", 0.5)])
+        # cheapmid is curated at 0.5 (< 0.72 floor) -> skipped; next cheapest = mid
+        self.assertEqual(recs[0].to_model, "mid")
+
+    def test_searches_whole_catalog_not_just_edges(self):
+        # No substitution edges at all, yet a recommendation is still found.
+        recs = self._rec(task="tool", subs=[])
+        self.assertTrue(recs)
+        self.assertEqual(recs[0].to_model, "cheapmid")
+
+
 if __name__ == "__main__":
     unittest.main()
