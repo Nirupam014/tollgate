@@ -23,9 +23,9 @@ tollgate:
     - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
     - if: '$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
   before_script:
-    # Install from PyPI (recommended): pip install tollgate
-    # Or vendor the package and: pip install ./tollgate
-    - pip install tollgate
+    # Install from PyPI (recommended). Add the [multilang] extra for Go/Java/Ruby
+    # graph recovery. The package is `tollgate-ci`; the CLI command stays `tollgate`.
+    - pip install "tollgate-ci[multilang]"
   script:
     - >
       tollgate analyze $AITC_PATHS

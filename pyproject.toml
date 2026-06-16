@@ -3,7 +3,7 @@ requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "tollgate"
+name = "tollgate-ci"
 version = "0.2.0"
 description = "Tollgate — prevention-first token-risk analysis for AI agents, for CI/CD. Predicts token cost, detects context explosion & recursive agent loops, and gates PRs/MRs before deploy."
 readme = "README.md"

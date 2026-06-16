@@ -9,8 +9,9 @@ All notable changes to this project are documented here. The format follows
 ## [0.2.0] — 2026-06-16
 
 ### Added
-- **Distribution.** Published to PyPI (`pip install tollgate`, plus the
-  `tokenizers` and `multilang` extras); the GitHub composite Action now installs
+- **Distribution.** Published to PyPI as `tollgate-ci` (`pip install tollgate-ci`,
+  plus the `tokenizers` and `multilang` extras; the import module and CLI command
+  remain `tollgate`); the GitHub composite Action now installs
   the `multilang` extra by default so Go/Java/Ruby graph recovery is active in CI;
   a container image and a tag-triggered PyPI release workflow are included.
 - **Built-in intent classifier for substitution.** A deterministic

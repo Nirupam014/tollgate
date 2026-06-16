@@ -39,19 +39,21 @@ Ollama, Hugging Face, and LiteLLM — plus LangChain and LlamaIndex model wrappe
 ## Install
 
 ```bash
-pip install tollgate                  # core (deterministic heuristic tokenizer)
-pip install "tollgate[tokenizers]"    # + tiktoken for exact OpenAI-family counts
-pip install "tollgate[multilang]"     # + tree-sitter: graph recovery for Go/Java/Ruby
-pip install "tollgate[tokenizers,multilang]"   # everything
+pip install tollgate-ci                  # core (deterministic heuristic tokenizer)
+pip install "tollgate-ci[tokenizers]"    # + tiktoken for exact OpenAI-family counts
+pip install "tollgate-ci[multilang]"     # + tree-sitter: graph recovery for Go/Java/Ruby
+pip install "tollgate-ci[tokenizers,multilang]"   # everything
 
 # pin to a release straight from GitHub (before/without PyPI):
 pip install "git+https://github.com/Nirupam014/tollgate@v0.2.0"
-pip install ./tollgate                # from a local checkout
+pip install ./tollgate                   # from a local checkout
 ```
 
-Core install is stdlib + PyYAML only, so it drops into any CI. The `multilang`
-extra (tree-sitter) is optional; without it Go/Java/Ruby fall back to the advisory
-textual lint instead of full graph recovery (never an error).
+The PyPI package is **`tollgate-ci`**, but the import module and CLI command stay
+`tollgate` (e.g. `import tollgate`, `tollgate analyze ...`). Core install is stdlib
++ PyYAML only, so it drops into any CI. The `multilang` extra (tree-sitter) is
+optional; without it Go/Java/Ruby fall back to the advisory textual lint instead
+of full graph recovery (never an error).
 
 ## Quick start
 
@@ -110,7 +112,7 @@ plugs into a pipeline several ways:
     multilang: "true"           # Go/Java/Ruby graph recovery (default)
 ```
 
-**As a CLI** in any CI (after `pip install tollgate`):
+**As a CLI** in any CI (after `pip install tollgate-ci`):
 
 ```bash
 tollgate analyze ./agents --fail-on block -o sarif=tollgate.sarif
