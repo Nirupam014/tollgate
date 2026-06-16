@@ -6,6 +6,20 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+- **Built-in intent classifier for substitution.** A deterministic
+  lexical-embedding classifier (token vector + cosine over per-domain prototype
+  lexicons, `intent.py`) infers each node's task domain (code, reasoning, math,
+  classification, summarization, image, audio, embedding, …) from its prompt and
+  node id. Substitution uses it to set the capability floor — a code/reasoning
+  task keeps a strong model even when `task_class` is absent, a classifier can drop
+  to a tiny one — and to **abstain** on non-text nodes (never swap an image/audio/
+  embedding node to a text model). It is always-on, stdlib-only, makes no model
+  calls, and feeds only the advisory recommendation layer — it never affects the
+  gate or the fingerprint, so determinism and reproducibility are preserved. (A
+  neural-embedding backend remains a possible future *optional* add-on behind the
+  same `classify` seam; it is deliberately not a hard dependency.)
+
 ### Changed
 - **Model substitution is now dynamic and requirement-driven.** It no longer
   depends on the hand-maintained `substitutions:` edge list. For each node it

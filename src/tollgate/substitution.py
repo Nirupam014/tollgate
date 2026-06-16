@@ -29,6 +29,7 @@ from dataclasses import dataclass
 from typing import Dict, List, Optional
 
 from .catalog import Model, ModelCatalog
+from .intent import classify_node
 from .ir import Workflow
 from .prediction import WorkflowPrediction
 
@@ -82,6 +83,8 @@ class _Requirements:
     needs_tools: bool
     min_context: int
     min_max_output: int
+    intent: str = "unknown"      # classified task domain (advisory, for the note)
+    abstain: bool = False        # non-text node (image/audio/embedding) -> don't swap
 
 
 class SubstitutionEngine:
@@ -96,14 +99,30 @@ class SubstitutionEngine:
 
     # --- requirement derivation ------------------------------------------------
     def _requirements(self, wf: Workflow, node, np_) -> _Requirements:
-        min_tier = self.task_min_tier.get(node.task_class, _DEFAULT_MIN_TIER)
+        # Built-in deterministic intent classifier: sets the capability floor for
+        # demanding tasks (code/reasoning/math) even when task_class is absent, and
+        # flags non-text nodes so we never recommend a text model for them. Advisory
+        # only — it never touches the gate or fingerprint.
+        intent = classify_node(node)
+        intent_floor = intent.tier_floor or 0
+        if node.task_class is not None:
+            # Two positive signals -> take the more conservative (higher) floor.
+            min_tier = max(self.task_min_tier.get(node.task_class, _DEFAULT_MIN_TIER),
+                           intent_floor)
+        elif intent.domain != "unknown":
+            # No declared task class: let the classified intent drive the floor.
+            min_tier = intent_floor
+        else:
+            # No signal at all: stay mid-tier so we don't downgrade blindly.
+            min_tier = _DEFAULT_MIN_TIER
         wf_uses_tools = any(n.kind == "tool" for n in wf.nodes)
         needs_tools = node.task_class == "tool" or wf_uses_tools
         in95 = getattr(np_.input_tokens, "p95", np_.input_tokens.p50)
         out95 = getattr(np_.output_tokens, "p95", np_.output_tokens.p50)
         min_context = int((in95 + out95) * _CTX_HEADROOM)
         min_max_output = int(max(out95, node.max_output_tokens or 0))
-        return _Requirements(min_tier, needs_tools, min_context, min_max_output)
+        return _Requirements(min_tier, needs_tools, min_context, min_max_output,
+                             intent=intent.domain, abstain=(intent.modality != "text"))
 
     def _supports(self, cand: Model, req: _Requirements) -> bool:
         if cand.quality_tier < req.min_tier:
@@ -146,6 +165,8 @@ class SubstitutionEngine:
                 continue
 
             req = self._requirements(wf, node, np_)
+            if req.abstain:
+                continue  # non-text node (image/audio/embedding): don't swap to a text model
             best: Optional[Recommendation] = None
             best_cost = current_cost
 
@@ -194,10 +215,11 @@ class SubstitutionEngine:
 
     @staticmethod
     def _notes(req: _Requirements, cand: Model) -> str:
-        parts = [f"meets tier>={req.min_tier}",
-                 f"ctx>={req.min_context:,}"]
+        parts = [f"meets tier>={req.min_tier}", f"ctx>={req.min_context:,}"]
         if req.needs_tools:
             parts.append("tool-calling")
+        if req.intent and req.intent != "unknown":
+            parts.append(f"intent: {req.intent}")
         basis = "cheapest model that supports this node (" + ", ".join(parts) + ")"
         if cand.self_hosted:
             basis += "; self-hosted candidate, savings assume amortized infra"

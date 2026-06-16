@@ -1611,6 +1611,64 @@ class TestDynamicSubstitution(unittest.TestCase):
         self.assertTrue(recs)
         self.assertEqual(recs[0].to_model, "cheapmid")
 
+    def _rec_prompt(self, prompt, node_id="n", subs=None):
+        from tollgate.catalog import ModelCatalog
+        from tollgate.ir import IRNode, Workflow
+        from tollgate.prediction import Dist, NodePrediction, WorkflowPrediction
+        from tollgate.substitution import SubstitutionEngine
+        node = IRNode(node_id=node_id, kind="llm_call", intended_model="big",
+                      prompt_template=prompt)
+        wf = Workflow(workflow_id="w", source_kind="dsl", nodes=[node], edges=[], entry=node_id)
+        npd = NodePrediction(node_id, "big", Dist(2000, 3000, 4000),
+                             Dist(500, 800, 1000), 1.0, "t", 0.9)
+        pred = WorkflowPrediction("w", [npd], Dist(0, 0, 0), Dist(0, 0, 0), 0.9, "t")
+        eng = SubstitutionEngine(self._catalog(subs), default_model="big")
+        return eng.recommend(wf, pred)
+
+    def test_intent_code_keeps_high_tier(self):
+        # A code task (no task_class) should NOT be downgraded to a mid-tier model;
+        # nothing tier>=4 is cheaper than the tier-5 current, so no rec.
+        recs = self._rec_prompt("Write a Python function to refactor this SQL query and fix the bug")
+        self.assertEqual(recs, [])
+
+    def test_intent_classification_allows_cheap_model(self):
+        # A clear classification task can drop to the cheapest tier-1 capable model.
+        recs = self._rec_prompt("Classify the support ticket sentiment into a category label")
+        self.assertTrue(recs)
+        self.assertIn("intent: classification", recs[0].notes)
+        # tiny (tier1) is the cheapest that now qualifies
+        self.assertEqual(recs[0].to_model, "tiny")
+
+    def test_intent_image_abstains(self):
+        # An image-generation node must not be swapped to a text model.
+        recs = self._rec_prompt("Generate an image of a cat, a picture rendered with dall-e diffusion")
+        self.assertEqual(recs, [])
+
+
+class TestIntentClassifier(unittest.TestCase):
+    def test_domains(self):
+        from tollgate.intent import classify
+        self.assertEqual(classify("write a python function and unit test").domain, "code")
+        self.assertEqual(classify("classify this ticket into a category").domain, "classification")
+        self.assertEqual(classify("summarize the article in a brief tldr").domain, "summarization")
+        self.assertEqual(classify("translate the text into english").domain, "translation")
+
+    def test_modality_guard(self):
+        from tollgate.intent import classify
+        self.assertEqual(classify("generate an image, a picture, dall-e illustration").modality, "image")
+        self.assertEqual(classify("transcribe the audio speech with whisper tts").modality, "audio")
+
+    def test_deterministic_and_unknown(self):
+        from tollgate.intent import classify
+        a = classify("write code in python"); b = classify("write code in python")
+        self.assertEqual((a.domain, a.confidence), (b.domain, b.confidence))
+        self.assertEqual(classify("").domain, "unknown")
+        self.assertEqual(classify("xyzzy qux").domain, "unknown")  # no signal -> unknown
+
+    def test_code_intent_has_high_tier_floor(self):
+        from tollgate.intent import classify
+        self.assertGreaterEqual(classify("refactor this code and fix the bug").tier_floor or 0, 4)
+
 
 if __name__ == "__main__":
     unittest.main()
