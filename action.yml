@@ -44,6 +44,11 @@ inputs:
     description: "Upload SARIF to GitHub code scanning (true/false)."
     required: false
     default: "true"
+  multilang:
+    description: "Install the tree-sitter extra so Go/Java/Ruby get full graph
+      recovery (not just the textual lint). true/false."
+    required: false
+    default: "true"
 
 outputs:
   gate:
@@ -63,7 +68,16 @@ runs:
 
     - name: Install Tollgate
       shell: bash
-      run: pip install "${{ github.action_path }}"
+      run: |
+        PKG="${{ github.action_path }}"
+        if [ "${{ inputs.multilang }}" = "true" ]; then
+          # Install with the tree-sitter extra for Go/Java/Ruby graph recovery;
+          # fall back to the core install if the extra can't be built here (the
+          # tool still runs — those languages just get the advisory textual lint).
+          pip install "${PKG}[multilang]" || pip install "$PKG"
+        else
+          pip install "$PKG"
+        fi
 
     - name: Run analysis
       id: analyze
