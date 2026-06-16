@@ -7,6 +7,33 @@ All notable changes to this project are documented here. The format follows
 ## [Unreleased]
 
 ### Added
+- **Built-in intent classifier for substitution.** A deterministic
+  lexical-embedding classifier (token vector + cosine over per-domain prototype
+  lexicons, `intent.py`) infers each node's task domain (code, reasoning, math,
+  classification, summarization, image, audio, embedding, …) from its prompt and
+  node id. Substitution uses it to set the capability floor — a code/reasoning
+  task keeps a strong model even when `task_class` is absent, a classifier can drop
+  to a tiny one — and to **abstain** on non-text nodes (never swap an image/audio/
+  embedding node to a text model). It is always-on, stdlib-only, makes no model
+  calls, and feeds only the advisory recommendation layer — it never affects the
+  gate or the fingerprint, so determinism and reproducibility are preserved. (A
+  neural-embedding backend remains a possible future *optional* add-on behind the
+  same `classify` seam; it is deliberately not a hard dependency.)
+
+### Changed
+- **Model substitution is now dynamic and requirement-driven.** It no longer
+  depends on the hand-maintained `substitutions:` edge list. For each node it
+  derives a requirement profile from the workflow — a capability floor implied by
+  the task class, the context window the node's predicted p95 tokens need, the
+  max-output, whether the node/workflow uses tools, and the provider allowlist —
+  then searches the **whole catalog** for the cheapest model that satisfies it.
+  Curated capability scores, when present, only refine the reported confidence (a
+  curated swap below `min_capability` is still skipped); everything else is gated
+  by the derived requirements. Deterministic, no LLM calls. Quality beyond the
+  tier floor isn't verifiable, so the recommendation stays advisory — set a
+  `model_allowlist` policy to constrain swaps to your providers.
+
+### Added
 - **Graph parity for Go, Java, and Ruby (optional `multilang` extra).** With
   `pip install "tollgate[multilang]"` (tree-sitter), these languages are recovered
   into the same Workflow IR as Python/JS and run through the same detectors

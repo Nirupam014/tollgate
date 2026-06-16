@@ -101,6 +101,16 @@ class ModelCatalog:
     def substitutes(self, model_id: str) -> List[Substitution]:
         return [s for s in self._subs if s.from_model == model_id]
 
+    def capability_hint(self, from_id: str, to_id: str) -> Optional[float]:
+        """Curated capability score for a from->to swap, if one was hand-listed in
+        the catalog. Advisory input to the substitution engine, not a gate — the
+        engine derives requirements from the workflow and only uses this to refine
+        the reported confidence when a maintainer happened to curate the pair."""
+        for s in self._subs:
+            if s.from_model == from_id and s.to_model == to_id:
+                return s.capability_score
+        return None
+
     def cheaper_alternatives(self, model_id: str, min_capability: float = 0.7) -> List[Substitution]:
         """Substitutes that are both safe enough and cheaper on a balanced workload."""
         base = self.get(model_id)

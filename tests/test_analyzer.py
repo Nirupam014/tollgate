@@ -1537,5 +1537,138 @@ class TestTreeSitterGraph(unittest.TestCase):
         self.assertEqual(crit, [])
 
 
+class TestDynamicSubstitution(unittest.TestCase):
+    """Substitution is requirement-driven: it searches the whole catalog and picks
+    the cheapest model that supports the node (task->tier floor, context window,
+    max-output, tool calling), not a hand-wired edge list."""
+
+    def _model(self, mid, tier, ctx, mx, tools, cin, cout, self_hosted=False):
+        from tollgate.catalog import Model
+        return Model(id=mid, provider="p", family="f", context_limit=ctx, max_output=mx,
+                     quality_tier=tier, supports_tools=tools, tokenizer="heuristic",
+                     input_per_mtok=cin, output_per_mtok=cout, self_hosted=self_hosted)
+
+    def _catalog(self, subs=None):
+        from tollgate.catalog import ModelCatalog
+        models = [
+            self._model("big", 5, 200000, 16384, True, 10.0, 30.0),
+            self._model("mid", 3, 200000, 16384, True, 1.0, 3.0),
+            self._model("cheapmid", 3, 200000, 16384, True, 0.5, 1.5),
+            self._model("tiny", 1, 8000, 4096, True, 0.1, 0.1),
+            self._model("smallctx", 3, 4000, 2048, True, 0.2, 0.2),
+            self._model("notools", 3, 200000, 16384, False, 0.2, 0.2),
+        ]
+        return ModelCatalog(models, subs or [])
+
+    def _wf_pred(self, task=None, in50=2000, out50=500, intended="big"):
+        from tollgate.ir import IRNode, Workflow
+        from tollgate.prediction import Dist, NodePrediction, WorkflowPrediction
+        node = IRNode(node_id="n", kind="llm_call", intended_model=intended, task_class=task)
+        wf = Workflow(workflow_id="w", source_kind="dsl", nodes=[node], edges=[], entry="n")
+        npd = NodePrediction("n", intended, Dist(in50, in50 * 1.5, in50 * 2),
+                             Dist(out50, out50 * 1.6, out50 * 2), 1.0, "t", 0.9)
+        pred = WorkflowPrediction("w", [npd], Dist(0, 0, 0), Dist(0, 0, 0), 0.9, "t")
+        return wf, pred
+
+    def _rec(self, task=None, subs=None, min_cap=0.72, min_sav=15.0, **kw):
+        from tollgate.substitution import SubstitutionEngine
+        cat = self._catalog(subs)
+        wf, pred = self._wf_pred(task=task, **kw)
+        eng = SubstitutionEngine(cat, min_capability=min_cap, min_savings_pct=min_sav,
+                                 default_model="big")
+        return eng.recommend(wf, pred)
+
+    def test_picks_cheapest_qualifying(self):
+        recs = self._rec(task="tool")
+        self.assertEqual(len(recs), 1)
+        self.assertEqual(recs[0].to_model, "cheapmid")   # cheapest tier>=2, tools, ctx ok
+
+    def test_tool_gating_excludes_no_tool_models(self):
+        recs = self._rec(task="tool")
+        self.assertNotEqual(recs[0].to_model, "notools")
+
+    def test_context_gating_excludes_small_windows(self):
+        recs = self._rec(task="routing", in50=10000)   # needs a big context window
+        self.assertTrue(recs)
+        self.assertNotIn(recs[0].to_model, ("tiny", "smallctx"))
+
+    def test_reasoning_not_downgraded(self):
+        # reasoning floor is tier 4; nothing cheaper than the tier-5 current qualifies
+        self.assertEqual(self._rec(task="reasoning"), [])
+
+    def test_min_savings_respected(self):
+        self.assertEqual(self._rec(task="tool", min_sav=99.9), [])
+
+    def test_curated_capability_floor_skips_weak_known_pair(self):
+        from tollgate.catalog import Substitution
+        recs = self._rec(task="tool", subs=[Substitution("big", "cheapmid", 0.5)])
+        # cheapmid is curated at 0.5 (< 0.72 floor) -> skipped; next cheapest = mid
+        self.assertEqual(recs[0].to_model, "mid")
+
+    def test_searches_whole_catalog_not_just_edges(self):
+        # No substitution edges at all, yet a recommendation is still found.
+        recs = self._rec(task="tool", subs=[])
+        self.assertTrue(recs)
+        self.assertEqual(recs[0].to_model, "cheapmid")
+
+    def _rec_prompt(self, prompt, node_id="n", subs=None):
+        from tollgate.catalog import ModelCatalog
+        from tollgate.ir import IRNode, Workflow
+        from tollgate.prediction import Dist, NodePrediction, WorkflowPrediction
+        from tollgate.substitution import SubstitutionEngine
+        node = IRNode(node_id=node_id, kind="llm_call", intended_model="big",
+                      prompt_template=prompt)
+        wf = Workflow(workflow_id="w", source_kind="dsl", nodes=[node], edges=[], entry=node_id)
+        npd = NodePrediction(node_id, "big", Dist(2000, 3000, 4000),
+                             Dist(500, 800, 1000), 1.0, "t", 0.9)
+        pred = WorkflowPrediction("w", [npd], Dist(0, 0, 0), Dist(0, 0, 0), 0.9, "t")
+        eng = SubstitutionEngine(self._catalog(subs), default_model="big")
+        return eng.recommend(wf, pred)
+
+    def test_intent_code_keeps_high_tier(self):
+        # A code task (no task_class) should NOT be downgraded to a mid-tier model;
+        # nothing tier>=4 is cheaper than the tier-5 current, so no rec.
+        recs = self._rec_prompt("Write a Python function to refactor this SQL query and fix the bug")
+        self.assertEqual(recs, [])
+
+    def test_intent_classification_allows_cheap_model(self):
+        # A clear classification task can drop to the cheapest tier-1 capable model.
+        recs = self._rec_prompt("Classify the support ticket sentiment into a category label")
+        self.assertTrue(recs)
+        self.assertIn("intent: classification", recs[0].notes)
+        # tiny (tier1) is the cheapest that now qualifies
+        self.assertEqual(recs[0].to_model, "tiny")
+
+    def test_intent_image_abstains(self):
+        # An image-generation node must not be swapped to a text model.
+        recs = self._rec_prompt("Generate an image of a cat, a picture rendered with dall-e diffusion")
+        self.assertEqual(recs, [])
+
+
+class TestIntentClassifier(unittest.TestCase):
+    def test_domains(self):
+        from tollgate.intent import classify
+        self.assertEqual(classify("write a python function and unit test").domain, "code")
+        self.assertEqual(classify("classify this ticket into a category").domain, "classification")
+        self.assertEqual(classify("summarize the article in a brief tldr").domain, "summarization")
+        self.assertEqual(classify("translate the text into english").domain, "translation")
+
+    def test_modality_guard(self):
+        from tollgate.intent import classify
+        self.assertEqual(classify("generate an image, a picture, dall-e illustration").modality, "image")
+        self.assertEqual(classify("transcribe the audio speech with whisper tts").modality, "audio")
+
+    def test_deterministic_and_unknown(self):
+        from tollgate.intent import classify
+        a = classify("write code in python"); b = classify("write code in python")
+        self.assertEqual((a.domain, a.confidence), (b.domain, b.confidence))
+        self.assertEqual(classify("").domain, "unknown")
+        self.assertEqual(classify("xyzzy qux").domain, "unknown")  # no signal -> unknown
+
+    def test_code_intent_has_high_tier_floor(self):
+        from tollgate.intent import classify
+        self.assertGreaterEqual(classify("refactor this code and fix the bug").tier_floor or 0, 4)
+
+
 if __name__ == "__main__":
     unittest.main()
